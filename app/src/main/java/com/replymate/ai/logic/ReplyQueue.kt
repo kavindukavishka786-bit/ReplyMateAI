@@ -5,6 +5,7 @@ import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
 import com.replymate.ai.data.SettingsRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,13 +40,15 @@ object ReplyQueue {
         internal.value = internal.value.filterNot { it.id == id }
     }
 
+    @Synchronized internal fun claim(id: String): PendingReply? =
+        internal.value.find { it.id == id }?.also { discard(id) }
+
     // Remove atomically before suspension: two taps cannot send the same draft.
     private val approvalMutex = ReplySendGate.mutex
 
     suspend fun approve(context: Context, id: String, reply: String): Boolean = approvalMutex.withLock {
-        val draft = synchronized(this) {
-            internal.value.find { it.id == id }?.also { discard(id) }
-        } ?: return@withLock false
+        val draft = claim(id) ?: return@withLock false
+        try {
         val age = System.currentTimeMillis() - draft.timestamp
         val repo = SettingsRepository(context.applicationContext)
         val current = repo.settings.first()
@@ -59,6 +62,12 @@ object ReplyQueue {
             repo.countSent()
         }
         sent
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (problem: Exception) {
+            runCatching { SettingsRepository(context.applicationContext)
+                .recordFailure(FailureDiagnosis.message(problem, ReplyStage.CONFIRM)) }
+            false
+        }
     }
 
 }

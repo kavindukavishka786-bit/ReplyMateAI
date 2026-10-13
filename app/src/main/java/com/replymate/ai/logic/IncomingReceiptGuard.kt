@@ -23,6 +23,7 @@ class IncomingReceiptGuard internal constructor(context: Context) {
     private val entries = ArrayList<Item>(256)
     private val key: ByteArray
     private var saltPersisted = true
+    private var readable = true
 
     companion object {
         private const val EXACT_TTL_MS = ReceiptPolicy.RETAIN_MS
@@ -52,11 +53,11 @@ class IncomingReceiptGuard internal constructor(context: Context) {
                 val at = row.optLong("at", 0L)
                 val exact = row.optString("exact", "")
                 val loose = row.optString("loose", "")
-                if (exact.isNotBlank() && loose.isNotBlank() && now - at in 0L..EXACT_TTL_MS) {
+                if (exact.isNotBlank() && loose.isNotBlank() && now - at <= EXACT_TTL_MS) {
                     entries.add(Item(exact, loose, at))
                 }
             }
-        }
+        }.onFailure { readable = false }
         if (entries.size > MAX_RECEIPTS) entries.subList(0, entries.size - MAX_RECEIPTS).clear()
     }
 
@@ -69,7 +70,8 @@ class IncomingReceiptGuard internal constructor(context: Context) {
     @Synchronized
     fun accept(chat: String, author: String, timestamp: Long, message: String,
                now: Long = System.currentTimeMillis()): Boolean {
-        entries.removeAll { now - it.at !in 0..EXACT_TTL_MS }
+        if (!readable || entries.any { now < it.at }) return false
+        entries.removeAll { now - it.at > EXACT_TTL_MS }
         val header = chat.trim() + "|" + author.trim() + "|"
         val normalized = IncomingReplySafety.normalizedBody(message)
         val loose = digest(header + normalized)
@@ -84,7 +86,8 @@ class IncomingReceiptGuard internal constructor(context: Context) {
 
     @Synchronized
     fun markOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
-        entries.removeAll { now - it.at !in 0L..EXACT_TTL_MS }
+        if (!readable || entries.any { now < it.at }) return false
+        entries.removeAll { now - it.at > EXACT_TTL_MS }
         val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
         entries.removeAll { it.exact == hash }
         if (entries.size >= MAX_RECEIPTS) return false
@@ -94,6 +97,7 @@ class IncomingReceiptGuard internal constructor(context: Context) {
 
     @Synchronized
     fun isOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
+        if (!readable || entries.any { now < it.at }) return true
         val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
         return entries.any { it.exact == hash && now - it.at in 0L..10 * 60_000L }
     }

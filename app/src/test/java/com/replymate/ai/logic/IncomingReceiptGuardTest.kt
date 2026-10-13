@@ -61,6 +61,17 @@ class IncomingReceiptGuardTest {
         assertFalse(stored.contains("Secret question"))
     }
 
+    @Test fun corruptedReceiptsAndClockRollbackFailClosed() {
+        val prefs = context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
+        prefs.edit().putString("receipts", "broken").commit()
+        val now = System.currentTimeMillis()
+        assertFalse(IncomingReceiptGuard(context).accept("Alex", "Alex", now, "Hello", now))
+        prefs.edit().clear().commit()
+        val guard = IncomingReceiptGuard(context)
+        assertTrue(guard.accept("Alex", "Alex", now, "Hello", now))
+        assertFalse(guard.accept("Alex", "Alex", now + 1, "New question", now - 1))
+    }
+
     @Test fun reservationsExpireAndOtherContactsAreIndependent() {
         val now = System.currentTimeMillis()
         val guard = IncomingReceiptGuard(context)
