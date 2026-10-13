@@ -46,6 +46,7 @@ class WhatsAppListener : NotificationListenerService() {
         val connected = _connected.asStateFlow()
         val isConnected: Boolean get() = _connected.value
         private const val MAX_PENDING_PER_CONTACT = 12
+        private const val MAX_INTAKE_PER_CONTACT = 128
         private const val FRESH_MESSAGE_WINDOW_MS = 180_000L
     }
 
@@ -74,6 +75,8 @@ class WhatsAppListener : NotificationListenerService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     // Shared with manual approval; accounting and dispatch never race.
 
+    private val intakeCounts = ConcurrentHashMap<String, AtomicInteger>()
+    private val intakeLocks = ConcurrentHashMap<String, Mutex>()
     private val senderLocks = ConcurrentHashMap<String, Mutex>()
     private val waitingCounts = ConcurrentHashMap<String, AtomicInteger>()
     private val lastActions = ConcurrentHashMap<String, Notification.Action>()
@@ -122,12 +125,38 @@ class WhatsAppListener : NotificationListenerService() {
             // Android may re-post the SAME WhatsApp message with a different
             // MessagingStyle timestamp. Guard both exact receipts and very recent
             // same-body notification refreshes, persisting salted digests across restarts.
-            enqueue(conversation, chat, person.key?.takeIf { it.isNotBlank() }
+            offer(conversation, chat, person.key?.takeIf { it.isNotBlank() }
                 ?: person.name?.toString().orEmpty(), person.name?.toString().orEmpty(), time, body, group, action)
         }
     }
 
-    private fun enqueue(conversation: String, chat: String, author: String, authorName: String, timestamp: Long, body: String, group: Boolean, action: Notification.Action) {
+    private fun offer(conversation: String, chat: String, author: String, authorName: String,
+                      timestamp: Long, body: String, group: Boolean, action: Notification.Action) {
+        val intakeCount = intakeCounts.computeIfAbsent(conversation) { AtomicInteger(0) }
+        if (intakeCount.incrementAndGet() > MAX_INTAKE_PER_CONTACT) {
+            intakeCount.decrementAndGet()
+            return
+        }
+        val intake = intakeLocks.computeIfAbsent(conversation) { Mutex() }
+        // Acquire in callback order, then move disk work off main. Duplicate refreshes
+        // must not occupy the bounded generation queue and crowd out a NEW message.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+            intake.withLock {
+                val admitted = withContext(Dispatchers.Default) {
+                    withContext(Dispatchers.IO) {
+                        ReplyFreshness.isFresh(timestamp) && receipts.accept(conversation, author,
+                            timestamp, body, legacyChat = chat, legacyAuthor = authorName)
+                    }
+                }
+                if (admitted) enqueue(conversation, chat, timestamp, body, group, action)
+            }
+            } finally { intakeCount.decrementAndGet() }
+        }
+    }
+
+    private fun enqueue(conversation: String, chat: String, timestamp: Long, body: String,
+                        group: Boolean, action: Notification.Action) {
         val count = waitingCounts.computeIfAbsent(conversation) { AtomicInteger(0) }
         if (count.incrementAndGet() > MAX_PENDING_PER_CONTACT) {
             count.decrementAndGet()
@@ -149,10 +178,7 @@ class WhatsAppListener : NotificationListenerService() {
                     // Force a *different* dispatcher first, then switch to IO.
                     withContext(Dispatchers.Default) {
                         withContext(Dispatchers.IO) {
-                            if (ReplyFreshness.isFresh(timestamp) &&
-                                receipts.accept(conversation, author, timestamp, body, legacyChat = chat, legacyAuthor = authorName)) {
-                                process(conversation, chat, timestamp, body, group, action)
-                            }
+                            process(conversation, chat, timestamp, body, group, action)
                         }
                     }
                 }

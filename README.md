@@ -198,6 +198,7 @@ Sample source released under the MIT License (see LICENSE). This project is inde
 
 ## Version 1.5.1 reliability changes
 
+- Duplicate refreshes are discarded in a bounded IO intake queue before they can fill the per-conversation generation queue.
 - Incoming receipts are synchronously committed on an IO thread before Gemini processing. All guard instances share a lock and read the persisted receipts. Timestamp aliases of suppressed refreshes are retained, including across process restarts; legacy 1.5.0 hashes are respected during upgrade.
 - Identical sender/body notifications are coalesced for **three minutes since the latest refresh**. This conservative choice prevents delayed duplicate replies, but can skip a genuinely repeated identical message. Different messages and conversation shortcut IDs remain independent. Exact aliases expire after 15 minutes; storage is bounded and fails closed if corrupt, full or unwritable.
 - Queued automatic replies older than three minutes, disconnected listeners and revoked notification access are rejected before dispatch. Manual approval rechecks the master switch, contact rules and group opt-in, consumes the draft before sending, and shares the automatic send/accounting mutex.
