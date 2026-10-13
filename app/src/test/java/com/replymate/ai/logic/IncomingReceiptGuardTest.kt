@@ -11,6 +11,9 @@ import org.robolectric.annotation.Config
 import java.util.concurrent.Callable
 import java.util.concurrent.Executors
 import org.json.JSONArray
+import org.json.JSONObject
+import java.security.MessageDigest
+import android.util.Base64
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28, 34])
@@ -44,6 +47,29 @@ class IncomingReceiptGuardTest {
                 .accept("chat", "author", 1_000, "Hello", 10_000) } }
             assertEquals(1, pool.invokeAll(calls).count { it.get() })
         } finally { pool.shutdownNow() }
+    }
+
+    @Test fun legacyVersion150ReceiptIsRespectedWhenShortcutAndAuthorKeyAppear() {
+        val key = ByteArray(32) { it.toByte() }
+        fun hash(value: String) = MessageDigest.getInstance("SHA-256")
+            .digest(key + value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        val legacy = JSONArray().put(JSONObject().put("exact", hash("Alice|Alice|1000|hello"))
+            .put("loose", hash("Alice|Alice|hello")).put("at", 10_000L))
+        context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit()
+            .putString("salt", Base64.encodeToString(key, Base64.NO_WRAP))
+            .putString("receipts", legacy.toString()).commit()
+        assertFalse(IncomingReceiptGuard(context).accept("shortcut-id", "person-key", 1_000, "Hello",
+            20_000, legacyChat = "Alice", legacyAuthor = "Alice"))
+    }
+
+    @Test fun fullReceiptStorageDoesNotEvictAndReplayLiveMessages() {
+        val rows = JSONArray()
+        repeat(2048) { rows.put(JSONObject().put("exact", "event-$it").put("loose", "body-$it").put("at", 10_000L)) }
+        context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit()
+            .putString("receipts", rows.toString()).commit()
+        assertFalse(IncomingReceiptGuard(context).accept("chat", "author", 1_000, "Hello", 20_000))
+        assertEquals(2048, JSONArray(context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
+            .getString("receipts", "[]")).length())
     }
 
     @Test fun storedReceiptsContainNoMessageOrContactText() {

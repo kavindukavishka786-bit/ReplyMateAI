@@ -182,13 +182,14 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                         powerSaving = powerSaving,
                         onEnable = { checked ->
                             if (!checked) BackgroundStatus.stop(ctx)
-                            scope.launch { repo.setEnabled(checked) }
-                            // Explicitly enabling Automatic while the app is visible
-                            // starts the foreground service. No second button required.
-                            if (checked && settings.mode == ReplyMode.AUTOMATIC &&
-                                listenerGranted && notificationGranted && hasKey) {
-                                backgroundError = if (BackgroundStatus.start(ctx)) "" else
-                                    "Android blocked background mode. Check permissions and battery settings."
+                            scope.launch {
+                                repo.setEnabled(checked)
+                                // Persist enabled state before the recovery service checks it.
+                                if (checked && settings.mode == ReplyMode.AUTOMATIC &&
+                                    listenerGranted && notificationGranted && hasKey) {
+                                    backgroundError = if (BackgroundStatus.start(ctx)) "" else
+                                        "Android blocked background mode. Check permissions and battery settings."
+                                }
                             }
                         },
                         onStartBackground = {
@@ -476,6 +477,10 @@ private fun ReviewScreen(reviews: List<PendingReply>, onApprove: suspend (Pendin
                     scope.launch {
                         try {
                             if (!onApprove(draft, response)) outcome = "Reply expired, paused, blocked or unavailable. Open WhatsApp to reply."
+                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            outcome = "Reply could not be completed. Open WhatsApp to check before retrying."
                         } finally { sending = false }
                     }
                 }, enabled = response.isNotBlank() && !sending, modifier = Modifier.weight(1f)) {
