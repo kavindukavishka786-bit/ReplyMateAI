@@ -47,6 +47,8 @@ import com.replymate.ai.data.ReplyMode
 import com.replymate.ai.data.SecretStore
 import com.replymate.ai.data.SettingsRepository
 import com.replymate.ai.logic.GeminiClient
+import com.replymate.ai.logic.FailureDiagnosis
+import com.replymate.ai.logic.ReplyStage
 import com.replymate.ai.logic.BackgroundStatus
 import com.replymate.ai.logic.WhatsAppListener
 import com.replymate.ai.logic.PendingReply
@@ -508,7 +510,13 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
             scope.launch {
                 result = withContext(Dispatchers.IO) {
                     runCatching { GeminiClient.draft(key, demoSender.ifBlank { "Friend" }, input, s.personality, s.ownerContext, modelId = s.modelId) }
-                        .getOrElse { "Test failed: ${it.message ?: "Network/API problem"}" }
+                        .getOrElse { cause ->
+                            val safeError = FailureDiagnosis.message(
+                                cause as? Exception ?: IllegalStateException("Unexpected failure"),
+                                ReplyStage.TEST
+                            )
+                            "Test failed: $safeError"
+                        }
                 }
                 busy = false
             }
