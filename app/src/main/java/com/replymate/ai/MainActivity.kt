@@ -187,7 +187,8 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                     Tab.SETTINGS -> SettingsScreen(settings, hasKey, secrets,
                         onHasKey = { hasKey = secrets.hasKey() },
                         onPersonality = { scope.launch { repo.setPersonality(it) } },
-                        onOwnerContext = { scope.launch { repo.setOwnerContext(it) } })
+                        onOwnerContext = { scope.launch { repo.setOwnerContext(it) } },
+                        onModel = { scope.launch { repo.setModel(it) } })
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -428,12 +429,12 @@ private fun ReviewScreen(reviews: List<PendingReply>, onApprove: (PendingReply, 
 @Composable
 private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore,
                            onHasKey: () -> Unit, onPersonality: (String) -> Unit,
-                           onOwnerContext: (String) -> Unit) {
+                           onOwnerContext: (String) -> Unit, onModel: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var keyInput by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
     var saveMessage by remember { mutableStateOf("") }
-    Block("Gemini connection", "Google Gemini 3.5 Flash-Lite") {
+    Block("Gemini connection", "Choose your Google Gemini model") {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Filled.Lock, null, tint = Mint)
             Spacer(Modifier.width(9.dp))
@@ -456,6 +457,22 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
             OutlinedButton(onClick = { secrets.clear(); onHasKey(); saveMessage = "API key removed." }) { Text("Remove") }
         }
         Text("Create a key at aistudio.google.com/api-keys. Never commit it to GitHub or share it.", fontSize = 12.sp, color = Muted)
+    }
+    Block("AI model", "If you see Gemini HTTP 404, try the other model if your key supports it.") {
+        Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+            FilterChip(
+                selected = s.modelId == "gemini-3.5-flash-lite",
+                onClick = { onModel("gemini-3.5-flash-lite") },
+                label = { Text("3.5 Flash-Lite", fontSize = 12.sp) }
+            )
+            FilterChip(
+                selected = s.modelId == "gemini-3.1-flash-lite",
+                onClick = { onModel("gemini-3.1-flash-lite") },
+                label = { Text("3.1 Flash-Lite", fontSize = 12.sp) }
+            )
+        }
+        Text("Current model: ${s.modelId}. Model and free-tier access depend on your Google AI Studio project.",
+            color = Muted, fontSize = 11.sp)
     }
     Block("Assistant personality", "Tell Gemini how to speak on your behalf.") {
         var personality by remember(s.personality) { mutableStateOf(s.personality) }
@@ -490,7 +507,7 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
             busy = true; result = ""
             scope.launch {
                 result = withContext(Dispatchers.IO) {
-                    runCatching { GeminiClient.draft(key, demoSender.ifBlank { "Friend" }, input, s.personality, s.ownerContext) }
+                    runCatching { GeminiClient.draft(key, demoSender.ifBlank { "Friend" }, input, s.personality, s.ownerContext, modelId = s.modelId) }
                         .getOrElse { "Test failed: ${it.message ?: "Network/API problem"}" }
                 }
                 busy = false
