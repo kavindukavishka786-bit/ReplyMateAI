@@ -11,6 +11,7 @@ import com.replymate.ai.data.SettingsRepository
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.runBlocking
+import org.robolectric.Shadows.shadowOf
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
@@ -25,6 +26,7 @@ import org.robolectric.annotation.Config
 class ManualReplySafetyTest {
     private val context get() = RuntimeEnvironment.getApplication()
     @Before fun clear() {
+        context.getSharedPreferences("outgoing_replies", Context.MODE_PRIVATE).edit().clear().commit()
         ReplyQueue.items.value.forEach { ReplyQueue.discard(it.id) }
         Settings.Secure.putString(context.contentResolver, "enabled_notification_listeners",
             ComponentName(context, WhatsAppListener::class.java).flattenToString())
@@ -37,6 +39,7 @@ class ManualReplySafetyTest {
     private fun action(): Notification.Action {
         val intent = PendingIntent.getBroadcast(context, 125, Intent("com.replymate.TEST").setPackage(context.packageName),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+        shadowOf(intent).setCreatorPackage("com.whatsapp")
         return Notification.Action.Builder(null, "Reply", intent)
             .addRemoteInput(RemoteInput.Builder("text").setAllowFreeFormInput(true).build()).build()
     }

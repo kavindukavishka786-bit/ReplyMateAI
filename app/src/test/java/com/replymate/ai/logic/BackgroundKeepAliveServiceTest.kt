@@ -23,6 +23,9 @@ class BackgroundKeepAliveServiceTest {
     private val context get() = RuntimeEnvironment.getApplication()
     @Before fun clear() {
         context.getSharedPreferences("replymate_background_settings", Context.MODE_PRIVATE).edit().clear().commit()
+        Settings.Secure.putString(context.contentResolver, "enabled_notification_listeners",
+            ComponentName(context, WhatsAppListener::class.java).flattenToString())
+        shadowOf(context).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
         BackgroundStatus.setRunning(false)
     }
 

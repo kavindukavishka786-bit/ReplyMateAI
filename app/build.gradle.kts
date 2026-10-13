@@ -12,9 +12,11 @@ android {
         applicationId = "com.replymate.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.5.1"
+        versionCode = 11
+        versionName = "1.5.2"
     }
+
+    testOptions { unitTests.isIncludeAndroidResources = true }
 
     buildTypes {
         release {
@@ -27,7 +29,6 @@ android {
     }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
-    testOptions { unitTests.isIncludeAndroidResources = true }
     packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
 }
 

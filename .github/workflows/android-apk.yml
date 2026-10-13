@@ -1,7 +1,7 @@
 name: Build ReplyMate APK
 on:
   push:
-    branches: [main, 'fix/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -22,6 +22,7 @@ jobs:
           java-version: '17'
       - name: Install Android API 36 using preinstalled SDK
         run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDK_MANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
           test -n "$SDK_MANAGER"
@@ -30,46 +31,54 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
-      - name: Regression tests, Android lint and APK
+      - name: Test and compile APK
         run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
-      - name: Verify APK identity, signing and tests
+      - name: Verify APK signature and identity
         run: |
-          mkdir -p verification
-          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
-          "$TOOLS/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk > verification/signing.txt
-          "$TOOLS/aapt" dump badging app/build/outputs/apk/debug/app-debug.apk > verification/apk-info.txt
-          grep "package: name='com.replymate.ai'.*versionCode='10'.*versionName='1.5.1'" verification/apk-info.txt
-          sha256sum app/build/outputs/apk/debug/app-debug.apk > verification/SHA256SUMS.txt
-          python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
-          reports = [ET.parse(p).getroot() for p in glob.glob('app/build/test-results/testDebugUnitTest/TEST-*.xml')]
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          "$SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK" | tee apk-signature.txt
+          "$SDK_ROOT/build-tools/35.0.0/aapt" dump badging "$APK" | tee apk-metadata.txt
+          python - <<'PY'
+          from pathlib import Path
+          import re, xml.etree.ElementTree as ET
+          text = Path('apk-metadata.txt').read_text()
+          build = Path('app/build.gradle.kts').read_text()
+          version = re.search(r'versionName = "([^"]+)"', build).group(1)
+          code = re.search(r'versionCode = (\d+)', build).group(1)
+          assert "package: name='com.replymate.ai'" in text
+          assert f"versionName='{version}'" in text and f"versionCode='{code}'" in text
+          assert "sdkVersion:'26'" in text and "targetSdkVersion:'35'" in text
+          assert "launchable-activity: name='com.replymate.ai.MainActivity'" in text
+          reports = [ET.parse(p).getroot() for p in Path('app/build/test-results/testDebugUnitTest').glob('TEST-*.xml')]
           assert reports, 'Missing test results'
-          tests = sum(int(r.attrib['tests']) for r in reports)
+          count = sum(int(r.attrib['tests']) for r in reports)
           failures = sum(int(r.attrib['failures']) + int(r.attrib['errors']) for r in reports)
           assert failures == 0
-          result = f'{tests} tests; {failures} failures/errors\n'
-          print(result)
-          open('verification/test-summary.txt', 'w').write(result)
+          Path('test-summary.txt').write_text(f'{count} tests; {failures} failures/errors\n')
+          print(f'{count} tests; {failures} failures/errors')
           PY
+          sha256sum "$APK" | tee apk-sha256.txt
+      - name: Upload test and verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReplyMate-Verification-Reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.*
+            apk-signature.txt
+            apk-metadata.txt
+            apk-sha256.txt
+            test-summary.txt
       - name: Upload installable APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ReplyMate-AI-Debug-APK
-          path: |
-            app/build/outputs/apk/debug/app-debug.apk
-            verification/
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-      - name: Upload test and lint reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ReplyMate-test-reports
-          path: |
-            app/build/reports/tests/
-            app/build/test-results/
-            app/build/reports/lint-results-debug.*
-          if-no-files-found: warn
 
   emulator-smoke:
     needs: android
@@ -85,12 +94,12 @@ jobs:
         with:
           name: ReplyMate-AI-Debug-APK
           path: built
-      - name: Enable KVM
+      - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Install and launch APK on Android 14
+      - name: Install, navigate and resume APK on Android 14
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -101,6 +110,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ReplyMate-emulator-smoke
+          name: ReplyMate-Emulator-Smoke
           path: smoke/
           if-no-files-found: warn

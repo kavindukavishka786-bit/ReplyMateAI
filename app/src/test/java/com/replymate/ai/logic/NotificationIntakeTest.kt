@@ -12,6 +12,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
+import org.robolectric.Shadows.shadowOf
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -32,8 +33,10 @@ class NotificationIntakeTest {
         val sender = Person.Builder().setName("Alice").setKey("alice").build()
         val owner = Person.Builder().setName("Owner").setKey("owner").build()
         fun notification(body: String): StatusBarNotification {
-            val reply = NotificationCompat.Action.Builder(0, "Reply", PendingIntent.getBroadcast(context, 8,
-                Intent("com.replymate.TEST").setPackage(context.packageName), PendingIntent.FLAG_MUTABLE))
+            val pending = PendingIntent.getBroadcast(context, 8,
+                Intent("com.replymate.TEST").setPackage(context.packageName), PendingIntent.FLAG_MUTABLE)
+            shadowOf(pending).setCreatorPackage("com.whatsapp")
+            val reply = NotificationCompat.Action.Builder(0, "Reply", pending)
                 .addRemoteInput(RemoteInput.Builder("reply").build()).build()
             val style = NotificationCompat.MessagingStyle(owner).setGroupConversation(false)
                 .addMessage(body, now, sender)

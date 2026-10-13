@@ -1,11 +1,7 @@
 package com.replymate.ai
 
 import android.Manifest
-import android.content.ComponentName
-import android.service.notification.NotificationListenerService
 import android.content.Intent
-import android.net.Uri
-import android.os.PowerManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -51,11 +47,11 @@ import com.replymate.ai.data.SettingsRepository
 import com.replymate.ai.logic.GeminiClient
 import com.replymate.ai.logic.FailureDiagnosis
 import com.replymate.ai.logic.ReplyStage
+import com.replymate.ai.logic.ListenerRecovery
 import com.replymate.ai.logic.BackgroundStatus
 import com.replymate.ai.logic.WhatsAppListener
 import com.replymate.ai.logic.PendingReply
 import com.replymate.ai.logic.ReplyQueue
-import com.replymate.ai.logic.ReplyPermissions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,43 +89,48 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
     val secrets = remember { SecretStore(ctx.applicationContext) }
     val scope = rememberCoroutineScope()
     val settings by repo.settings.collectAsStateWithLifecycle(initialValue = AppSettings())
+    val latestSettings by rememberUpdatedState(settings)
     val reviews by ReplyQueue.items.collectAsStateWithLifecycle()
     val backgroundRunning by BackgroundStatus.running.collectAsStateWithLifecycle()
     val listenerConnected by WhatsAppListener.connected.collectAsStateWithLifecycle()
     var backgroundError by remember { mutableStateOf("") }
+    val serviceError by BackgroundStatus.error.collectAsStateWithLifecycle()
+    var restartAfterBoot by remember { mutableStateOf(BackgroundStatus.restartAfterBoot(ctx)) }
+    var batteryUnrestricted by remember { mutableStateOf(false) }
+    var batterySaver by remember { mutableStateOf(false) }
+    var resumed by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.HOME) }
     LaunchedEffect(reviewOpenSequence) { if (reviewOpenSequence > 0) tab = Tab.REVIEWS }
     var hasKey by remember { mutableStateOf(secrets.hasKey()) }
     var listenerGranted by remember { mutableStateOf(false) }
     var notificationGranted by remember { mutableStateOf(false) }
     var askAuto by remember { mutableStateOf(false) }
-    var batteryExempt by remember { mutableStateOf(false) }
-    var powerSaving by remember { mutableStateOf(false) }
     val lifecycle = LocalLifecycleOwner.current
 
     fun refresh() {
-        listenerGranted = ReplyPermissions.listenerAllowed(ctx)
-        val power = ctx.getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
-        batteryExempt = power.isIgnoringBatteryOptimizations(ctx.packageName)
-        powerSaving = power.isPowerSaveMode
-        notificationGranted = Build.VERSION.SDK_INT < 33 ||
-            ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        listenerGranted = ListenerRecovery.hasAccess(ctx)
+        notificationGranted = BackgroundStatus.notificationsAllowed(ctx)
+        batteryUnrestricted = (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
+            .isIgnoringBatteryOptimizations(ctx.packageName)
+        batterySaver = (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager).isPowerSaveMode
         hasKey = secrets.hasKey()
         // User previously enabled the visible keep-alive; if the OS killed
         // that service, recover only while this Activity is visible.
         if (BackgroundStatus.requested(ctx) && !BackgroundStatus.running.value &&
-            settings.enabled && listenerGranted && notificationGranted && hasKey) {
-            BackgroundStatus.start(ctx)
+            latestSettings.enabled && listenerGranted && notificationGranted && hasKey &&
+            !BackgroundStatus.stoppedByUser(ctx)) {
+            BackgroundStatus.recover(ctx)
         }
-        if (listenerGranted && !WhatsAppListener.isConnected) {
-            runCatching {
-                NotificationListenerService.requestRebind(ComponentName(ctx, WhatsAppListener::class.java))
-            }
-        }
+        if (listenerGranted) ListenerRecovery.requestIfNeeded(ctx)
+
     }
     DisposableEffect(lifecycle) {
-        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) refresh() }
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) { resumed = true; refresh() }
+            if (event == Lifecycle.Event.ON_PAUSE) resumed = false
+        }
         lifecycle.lifecycle.addObserver(observer)
+        resumed = lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         refresh()
         onDispose { lifecycle.lifecycle.removeObserver(observer) }
     }
@@ -138,8 +139,8 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
     // Start/recover the foreground service while this Activity is visible for
     // users who explicitly selected Automatic mode. Respect Stop Background:
     // it must never silently restart if the user stopped it themselves.
-    LaunchedEffect(settings.enabled, settings.mode, listenerGranted, notificationGranted, hasKey) {
-        if (settings.enabled && settings.mode == ReplyMode.AUTOMATIC &&
+    LaunchedEffect(resumed, settings.enabled, settings.mode, listenerGranted, notificationGranted, hasKey) {
+        if (resumed && settings.enabled && settings.mode == ReplyMode.AUTOMATIC &&
             listenerGranted && notificationGranted && hasKey &&
             !BackgroundStatus.running.value &&
             !BackgroundStatus.stoppedByUser(ctx)) {
@@ -178,13 +179,17 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                 when (tab) {
                     Tab.HOME -> HomeScreen(settings, listenerGranted, notificationGranted, hasKey, reviews.size,
                         listenerConnected = listenerConnected, backgroundRunning = backgroundRunning,
-                        backgroundError = backgroundError, batteryExempt = batteryExempt,
-                        powerSaving = powerSaving,
+                        backgroundError = backgroundError.ifBlank { serviceError },
+                        batteryUnrestricted = batteryUnrestricted, batterySaver = batterySaver, restartAfterBoot = restartAfterBoot,
+                        onRestartAfterBoot = { restartAfterBoot = it; BackgroundStatus.setRestartAfterBoot(ctx, it) },
+                        onAppSettings = {
+                            runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                android.net.Uri.parse("package:${ctx.packageName}"))) }
+                        },
                         onEnable = { checked ->
                             if (!checked) BackgroundStatus.stop(ctx)
                             scope.launch {
                                 repo.setEnabled(checked)
-                                // Persist enabled state before the recovery service checks it.
                                 if (checked && settings.mode == ReplyMode.AUTOMATIC &&
                                     listenerGranted && notificationGranted && hasKey) {
                                     backgroundError = if (BackgroundStatus.start(ctx)) "" else
@@ -199,10 +204,6 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                         onStopBackground = { BackgroundStatus.stop(ctx); backgroundError = "" },
                         onBatterySettings = {
                             runCatching { ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-                        },
-                        onAppSettings = {
-                            runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                                Uri.parse("package:${ctx.packageName}"))) }
                         },
                         onManual = { scope.launch { repo.setMode(ReplyMode.MANUAL) } },
                         onAuto = { askAuto = true },
@@ -238,10 +239,12 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
             title = { Text("Enable automatic replies?") },
             text = { Text("ReplyMate may send messages without review. Only use this with consent and trusted contacts. WhatsApp can restrict unofficial automation. Daily limits and cooldowns apply.") },
             confirmButton = { TextButton(onClick = {
-                scope.launch { repo.setMode(ReplyMode.AUTOMATIC) }
-                if (settings.enabled && listenerGranted && notificationGranted && hasKey) {
-                    backgroundError = if (BackgroundStatus.start(ctx)) "" else
-                        "Android blocked background mode. Check permissions and battery settings."
+                scope.launch {
+                    repo.setMode(ReplyMode.AUTOMATIC)
+                    if (settings.enabled && listenerGranted && notificationGranted && hasKey) {
+                        backgroundError = if (BackgroundStatus.start(ctx)) "" else
+                            "Android blocked background mode. Check permissions and battery settings."
+                    }
                 }
                 askAuto = false
             }) { Text("I understand") } },
@@ -285,10 +288,11 @@ private fun Header(tab: Tab, count: Int) {
 @Composable
 private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boolean, reviews: Int,
                        listenerConnected: Boolean, backgroundRunning: Boolean, backgroundError: String,
-                       batteryExempt: Boolean, powerSaving: Boolean,
                        onEnable: (Boolean) -> Unit, onManual: () -> Unit, onAuto: () -> Unit,
                        onStartBackground: () -> Unit, onStopBackground: () -> Unit,
                        onBatterySettings: () -> Unit, onAppSettings: () -> Unit,
+                       batteryUnrestricted: Boolean, batterySaver: Boolean, restartAfterBoot: Boolean,
+                       onRestartAfterBoot: (Boolean) -> Unit,
                        onListener: () -> Unit, onNotification: () -> Unit,
                        onConfigureKey: () -> Unit, onSeeReviews: () -> Unit) {
     Surface(shape = RoundedCornerShape(26.dp), color = Panel) {
@@ -312,7 +316,7 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
                     Text("Enable ReplyMate", fontWeight = FontWeight.SemiBold)
                     Text("Master switch", color = Muted, fontSize = 12.sp)
                 }
-                Switch(checked = s.enabled, enabled = access && key && (notif || s.mode == ReplyMode.AUTOMATIC),
+                Switch(checked = s.enabled, enabled = access && key && notif,
                     onCheckedChange = onEnable)
             }
         }
@@ -354,20 +358,19 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
             Spacer(Modifier.width(8.dp))
             Text("Battery optimization settings")
         }
-        Text(if (batteryExempt) "Android battery optimization: unrestricted"
-             else "Android battery optimization: restricted · allow unrestricted use",
-             color = if (batteryExempt) Mint else Warm, fontSize = 12.sp)
-        if (powerSaving) Text("Battery saver is on. Background notifications may be delayed.", color = Warm, fontSize = 12.sp)
-        OutlinedButton(onClick = onAppSettings, modifier = Modifier.fillMaxWidth()) { Text("Open ReplyMate app settings") }
-        Text("Infinix / XOS setup", color = Mint, fontWeight = FontWeight.SemiBold)
-        Text("1. Allow Auto-start in Phone Master or your phone settings.\n2. Set ReplyMate battery use to Unrestricted and allow background activity.\n3. Lock ReplyMate in Recent apps if XOS offers it.\n4. Disable Power Marathon / battery saver while testing. Menu names vary by XOS version.",
-             color = Muted, fontSize = 12.sp)
-        Text("Test: leave this app, lock your screen and ask an approved contact to send two different messages. Confirm one reply per message and that the ReplyMate notification remains visible.",
-             color = Muted, fontSize = 12.sp)
         if (backgroundError.isNotBlank()) Text(backgroundError, color = Warm, fontSize = 12.sp)
         Text("Automatic mode starts this foreground service for you while the app is open. Confirm a persistent ReplyMate notification appears before leaving the app. Android battery restrictions can still stop it.",
              fontSize = 11.sp, color = Muted)
-        Text("After a reboot or force-stop, reopen ReplyMate and enable background mode. Closing the screen should leave the service running, but some XOS/Infinix power managers may kill it. Allow Auto-start and Unrestricted battery use.",
+        Text(if (batteryUnrestricted) "Battery optimization: unrestricted"
+             else "Battery optimization is active. Select ReplyMate and choose Unrestricted / Don't optimize.",
+             fontSize = 11.sp, color = if (batteryUnrestricted) Mint else Warm)
+        if (batterySaver) Text("Battery Saver is on; background notifications may be delayed.", color = Warm, fontSize = 11.sp)
+        OutlinedButton(onClick = onAppSettings, modifier = Modifier.fillMaxWidth()) {
+            Text("Open app settings")
+        }
+        ControlRow("Restart after reboot", "Resume a previously enabled background session after reboot or app update.",
+            restartAfterBoot, onRestartAfterBoot)
+        Text("Infinix / XOS: allow Auto-start and background activity in your battery or startup manager. If offered, exclude ReplyMate from Power Marathon restrictions and lock it in Recent apps. Names vary by XOS version. After Force stop, reopen ReplyMate. Stop and the master switch remain respected.",
              fontSize = 11.sp, color = Warm)
     }
     Block("Reply mode", "Choose how you want AI messages handled.") {
@@ -448,6 +451,7 @@ private fun RulesScreen(s: AppSettings, onAllowAll: (Boolean) -> Unit, onAllowed
 
 @Composable
 private fun ReviewScreen(reviews: List<PendingReply>, onApprove: suspend (PendingReply, String) -> Boolean, onDismiss: (String) -> Unit) {
+    val scope = rememberCoroutineScope()
     if (reviews.isEmpty()) {
         Block("All caught up", "New AI drafts will appear here while manual mode is active.") {
             Column(Modifier.fillMaxWidth().padding(vertical = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -457,7 +461,6 @@ private fun ReviewScreen(reviews: List<PendingReply>, onApprove: suspend (Pendin
             }
         }
     }
-    val scope = rememberCoroutineScope()
     reviews.forEach { draft ->
         Block(draft.sender, "Suggested response • Expires after 5 minutes") {
             Text("THEIR MESSAGE", fontSize = 10.sp, color = Muted, letterSpacing = 1.sp)
@@ -471,16 +474,12 @@ private fun ReviewScreen(reviews: List<PendingReply>, onApprove: suspend (Pendin
                 maxLines = 6, shape = RoundedCornerShape(15.dp))
             if (outcome.isNotEmpty()) Text(outcome, color = Warm, fontSize = 12.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = { onDismiss(draft.id) }, modifier = Modifier.weight(1f)) { Text("Discard") }
+                OutlinedButton(onClick = { onDismiss(draft.id) }, enabled = !sending, modifier = Modifier.weight(1f)) { Text("Discard") }
                 Button(onClick = {
                     sending = true
                     scope.launch {
                         try {
-                            if (!onApprove(draft, response)) outcome = "Reply expired, paused, blocked or unavailable. Open WhatsApp to reply."
-                        } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            outcome = "Reply could not be completed. Open WhatsApp to check before retrying."
+                            if (!onApprove(draft, response)) outcome = "Reply blocked or action expired. Check rules and reply in WhatsApp."
                         } finally { sending = false }
                     }
                 }, enabled = response.isNotBlank() && !sending, modifier = Modifier.weight(1f)) {

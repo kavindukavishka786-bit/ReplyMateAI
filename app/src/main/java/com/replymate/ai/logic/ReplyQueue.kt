@@ -4,12 +4,14 @@ import android.app.Notification
 import android.app.RemoteInput
 import android.content.Context
 import android.content.Intent
+import com.replymate.ai.data.SettingsRepository
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import java.util.UUID
-import com.replymate.ai.data.SettingsRepository
-import kotlinx.coroutines.sync.withLock
 
 data class PendingReply(
     val id: String,
@@ -39,39 +41,56 @@ object ReplyQueue {
         internal.value = internal.value.filterNot { it.id == id }
     }
 
-    suspend fun approve(context: Context, id: String, reply: String): Boolean = ReplyDispatch.mutex.withLock {
-        val draft = internal.value.find { it.id == id } ?: return@withLock false
-        val repo = SettingsRepository(context.applicationContext)
-        val current = repo.settings.first()
-        if (reply.isBlank() || System.currentTimeMillis() - draft.timestamp !in 0L..300_000L ||
-            !current.enabled || (draft.group && !current.includeGroups) ||
-            !ContactRules.isPermitted(draft.sender, current.allowed, current.blocked, current.allowAll) ||
-            !WhatsAppListener.isConnected || !ReplyPermissions.listenerAllowed(context)) {
-            discard(id)
-            return@withLock false
+    @Synchronized internal fun claim(id: String): PendingReply? =
+        internal.value.find { it.id == id }?.also { discard(id) }
+
+    // Remove atomically before suspension: two taps cannot send the same draft.
+    private val approvalMutex = ReplySendGate.mutex
+
+    suspend fun approve(context: Context, id: String, reply: String): Boolean = approvalMutex.withLock {
+        val draft = claim(id) ?: return@withLock false
+        try {
+            val age = System.currentTimeMillis() - draft.timestamp
+            val repo = SettingsRepository(context.applicationContext)
+            val current = repo.settings.first()
+            if (age !in 0L..5 * 60_000L || !WhatsAppListener.isConnected || !ListenerRecovery.hasAccess(context) ||
+                !SendSafety.permits(current, draft.sender, draft.group, draft.incoming, reply)) {
+                return@withLock false
+            }
+            val sent = ReplyTransport.send(context, draft.action, reply, draft.sender)
+            if (sent) {
+                ConversationMemory.record(draft.conversation, draft.incoming, reply)
+                repo.countSent()
+            }
+            sent
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (problem: Exception) {
+            runCatching { SettingsRepository(context.applicationContext)
+                .recordFailure(FailureDiagnosis.message(problem, ReplyStage.CONFIRM)) }
+            false
         }
-        // Consume BEFORE dispatch; even an accounting failure must never send twice.
-        discard(id)
-        val sent = ReplyTransport.send(context, draft.action, reply.take(700), draft.sender)
-        if (sent) {
-            ConversationMemory.record(draft.conversation, draft.incoming, reply.take(700))
-            repo.countSent()
-        }
-        sent
     }
 
 }
+
+object ReplySendGate { val mutex get() = ReplyDispatch.mutex }
 
 object ReplyTransport {
     /** Reply through WhatsApp's supplied notification PendingIntent, not a private API. */
     fun send(context: Context, action: Notification.Action, reply: String, recipient: String): Boolean = runCatching {
         val inputs = action.remoteInputs?.filter { it.allowFreeFormInput } ?: emptyList()
+        require(action.actionIntent?.creatorPackage == "com.whatsapp") { "Unexpected reply target" }
+        require(reply.isNotBlank() && reply.length <= 700) { "Invalid reply" }
+        require(ListenerRecovery.hasAccess(context)) { "Notification access revoked" }
         require(inputs.isNotEmpty()) { "No compatible reply action" }
         val intent = Intent().addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         val values = android.os.Bundle()
         inputs.forEach { values.putCharSequence(it.resultKey, reply) }
         RemoteInput.addResultsToIntent(inputs.toTypedArray(), intent, values)
         // Register before PendingIntent.send: it can synchronously re-post WhatsApp notifications.
+        check(OutgoingReplyGuard(context).markOutgoing(recipient, reply)) {
+            "Cannot safely record outgoing reply"
+        }
         ReplyLoopGuard.markOutgoing(recipient, reply)
         action.actionIntent.send(context, 0, intent)
     }.isSuccess
