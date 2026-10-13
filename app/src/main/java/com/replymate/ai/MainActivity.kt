@@ -176,6 +176,7 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                         onBlocked = { scope.launch { repo.setBlocked(it) } },
                         onGroups = { scope.launch { repo.setGroups(it) } },
                         onCooldown = { scope.launch { repo.setCooldown(it) } },
+                        onInstant = { scope.launch { repo.setInstantReplies(it) } },
                         onLimit = { scope.launch { repo.setDailyLimit(it) } })
                     Tab.REVIEWS -> ReviewScreen(reviews,
                         onApprove = { draft, message ->
@@ -316,7 +317,7 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
     Block("Reply mode", "Choose how you want AI messages handled.") {
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             ModeButton("Manual", "Approve each reply", Icons.Filled.TaskAlt, s.mode == ReplyMode.MANUAL, Modifier.weight(1f), onManual)
-            ModeButton("Automatic", "Replies instantly", Icons.Filled.AutoMode, s.mode == ReplyMode.AUTOMATIC, Modifier.weight(1f), onAuto)
+            ModeButton("Automatic", "Auto-send replies", Icons.Filled.AutoMode, s.mode == ReplyMode.AUTOMATIC, Modifier.weight(1f), onAuto)
         }
         if (s.mode == ReplyMode.AUTOMATIC) Text("Automatic mode is experimental. Use trusted contacts only.", color = Warm, fontSize = 12.sp)
         if (!s.allowAll && s.allowed.isBlank()) Text("No approved contact names yet. Add names in Rules before expecting replies.", color = Warm, fontSize = 12.sp)
@@ -337,7 +338,8 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
 @Composable
 private fun RulesScreen(s: AppSettings, onAllowAll: (Boolean) -> Unit, onAllowed: (String) -> Unit,
                         onBlocked: (String) -> Unit, onGroups: (Boolean) -> Unit,
-                        onCooldown: (Int) -> Unit, onLimit: (Int) -> Unit) {
+                        onCooldown: (Int) -> Unit, onInstant: (Boolean) -> Unit,
+                        onLimit: (Int) -> Unit) {
     Block("Contact access", "Exact notification names only. One name per line.") {
         ControlRow("Allow any contact", "OFF is safer: approved names only", s.allowAll, onAllowAll)
         var allowed by remember(s.allowed) { mutableStateOf(s.allowed) }
@@ -351,12 +353,17 @@ private fun RulesScreen(s: AppSettings, onAllowAll: (Boolean) -> Unit, onAllowed
             minLines = 2, maxLines = 5, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp))
         ControlRow("Include group chats", "Not recommended; off by default", s.includeGroups, onGroups)
     }
-    Block("Safety limits", "Prevent bursts and accidental repetitive replies.") {
-        Text("Minimum time between replies to a contact: ${s.cooldownMinutes} minutes", fontSize = 13.sp)
-        Slider(value = s.cooldownMinutes.toFloat(), onValueChange = { onCooldown(it.toInt()) }, valueRange = 1f..120f, steps = 118)
+    Block("Reply speed and safety limits", "Control how quickly incoming messages are answered.") {
+        ControlRow("Instant replies", "Answer every new message without the 15-minute timer", s.instantReplies, onInstant)
+        if (!s.instantReplies) {
+            Text("Minimum time between replies to a contact: ${s.cooldownMinutes} minutes", fontSize = 13.sp)
+            Slider(value = s.cooldownMinutes.toFloat(), onValueChange = { onCooldown(it.toInt()) }, valueRange = 1f..120f, steps = 118)
+        } else {
+            Text("New messages enter a short per-contact queue immediately. Gemini API and WhatsApp notification delivery still take time.", color = Mint, fontSize = 12.sp)
+        }
         Text("Automatic send limit per day: ${s.dailyLimit}", fontSize = 13.sp)
         Slider(value = s.dailyLimit.toFloat(), onValueChange = { onLimit(it.toInt()) }, valueRange = 1f..50f, steps = 48)
-        InfoText("Cooldowns reset if Android restarts the service. Daily sent counters persist on the phone.")
+        InfoText("Instant mode bypasses the old cooldown but keeps sender checks, outgoing-loop protection, deduplication, and the daily send limit. Messages arriving without accessible WhatsApp notifications cannot be recovered.")
     }
 }
 
