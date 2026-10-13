@@ -40,7 +40,7 @@ object ReplyQueue {
             discard(id)
             return false
         }
-        val sent = ReplyTransport.send(context, draft.action, reply.take(700))
+        val sent = ReplyTransport.send(context, draft.action, reply.take(700), draft.sender)
         if (sent) ConversationMemory.record(draft.sender, draft.incoming, reply)
         discard(id)
         return sent
@@ -49,13 +49,15 @@ object ReplyQueue {
 
 object ReplyTransport {
     /** Reply through WhatsApp's supplied notification PendingIntent, not a private API. */
-    fun send(context: Context, action: Notification.Action, reply: String): Boolean = runCatching {
+    fun send(context: Context, action: Notification.Action, reply: String, recipient: String): Boolean = runCatching {
         val inputs = action.remoteInputs?.filter { it.allowFreeFormInput } ?: emptyList()
         require(inputs.isNotEmpty()) { "No compatible reply action" }
         val intent = Intent().addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         val values = android.os.Bundle()
         inputs.forEach { values.putCharSequence(it.resultKey, reply) }
         RemoteInput.addResultsToIntent(inputs.toTypedArray(), intent, values)
+        // Register before PendingIntent.send: it can synchronously re-post WhatsApp notifications.
+        ReplyLoopGuard.markOutgoing(recipient, reply)
         action.actionIntent.send(context, 0, intent)
     }.isSuccess
 }
