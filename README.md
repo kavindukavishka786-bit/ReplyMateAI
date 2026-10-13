@@ -21,6 +21,18 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Instant per-message replies (v1.4.0)
+
+The previous automatic mode could skip fast follow-up messages because of a default 15-minute cooldown, a 20-second post-send suppression window, and a one-in-flight-message-per-contact gate.
+
+Version 1.4.0 introduces **Rules → Instant replies** (ON by default, including for existing installations). When enabled, the old cooldown is bypassed. An updated notification's multiple fresh `MessagingStyle` messages are processed individually in chronological order with a bounded per-contact queue (up to 12 pending messages), instead of discarding new messages while Gemini is busy. Separate contacts can be processed concurrently. Previously processed notification messages are deduplicated.
+
+Outward-message protection still checks structured sender metadata, your own outgoing message text fingerprint, contact allowlists, and daily send limits. **Real incoming messages are no longer silenced for 20 seconds simply because the bot has just replied.**
+
+To use: choose **Automatic** mode, turn ReplyMate ON, start **Keep running**, enable **Rules → Instant replies**, and ensure the daily send limit is sufficient. An actual AI reply is sent after Gemini has produced it and Android's WhatsApp notification direct-reply action accepts it. There is no guaranteed fixed delivery time, and multiple messages from the same person are handled in order (not simultaneously).
+
+Caveats: only *fresh* notifications received in the last 3 minutes with valid sender/timestamp metadata can be queued; the listener is not a WhatsApp message-history reader. If the queue is full, the service is killed, WhatsApp hides or groups notifications without proper message metadata, Gemini quota is exhausted, the daily send cap is reached, or Android is offline, some messages will not receive automatic replies. The app does not bypass WhatsApp's restrictions and automatic messaging can put a personal account at risk.
+
 ## Background operation (v1.3.0)
 
 **Why the app seemed to reply only when opened:** Android can stop background processes, especially on phones with aggressive battery management. A system-bound `NotificationListenerService` receives WhatsApp notifications independently of the Activity, but it can still be disconnected or killed by the OS. And **Manual** mode intentionally waits for the user to approve a draft, even when notification detection happens in the background.
@@ -37,16 +49,16 @@ To opt in to continuous background operation:
 
 ## Existing safety protections
 
-All earlier inbound-only sender checks, 20-second feedback guard, 10-minute echoed-own-text guard, allowlist, daily send cap and cooldown remain active. These checks intentionally skip uncertain notifications.
+All earlier inbound-only sender checks, outgoing-message echo guard, 10-minute echoed-own-text guard, allowlist, daily send cap and cooldown remain active. These checks intentionally skip uncertain notifications.
 
 ## Important outgoing-message loop fix (v1.2.0)
 
 ReplyMate previously could mistake its **own sent message** for an incoming WhatsApp notification, then respond again. Version 1.2.0 prevents that feedback loop in two ways:
 
 1. It accepts only notifications that expose structured Android MessagingStyle messages with a distinct, identifiable sender. It no longer trusts the generic `EXTRA_TEXT` notification preview as proof of an incoming message; ambiguous or unsupported notifications are **ignored**.
-2. Immediately **before** sending a manual or automatic reply, it records a short-lived outgoing fingerprint. For that contact, notification updates are blocked for 20 seconds, and echoes of the actual outgoing text are rejected for 10 minutes. No raw messages are saved to disk.
+2. It records an outgoing text fingerprint immediately before sending. Since v1.4.0, it **no longer blocks all notifications for 20 seconds**; only exact echoes of its own outgoing text are rejected for up to 10 minutes. No raw messages are saved to disk.
 
-This conservative approach may **miss real messages** received very shortly after a sent reply, or all messages on WhatsApp builds that do not expose sender metadata. That tradeoff avoids repetitive auto-sending. Keep manual mode while testing. It is not an official WhatsApp integration and cannot guarantee correct direction detection on every phone. Send messages from a second WhatsApp account for testing. Stop using the app if self-replies recur.
+This conservative approach may **miss legitimate messages with the exact same text as an outgoing reply**, or all messages on WhatsApp builds that do not expose sender metadata. That tradeoff avoids repetitive auto-sending. Keep manual mode while testing. It is not an official WhatsApp integration and cannot guarantee correct direction detection on every phone. Send messages from a second WhatsApp account for testing. Stop using the app if self-replies recur.
 
 ## Personalized reply examples (v1.1.0)
 
