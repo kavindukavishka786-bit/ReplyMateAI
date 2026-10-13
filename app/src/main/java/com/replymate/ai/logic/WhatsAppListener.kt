@@ -47,12 +47,16 @@ class WhatsAppListener : NotificationListenerService() {
         val connected = _connected.asStateFlow()
         val isConnected: Boolean get() = _connected.value
         private const val MAX_PENDING_PER_CONTACT = 12
-        private const val FRESH_MESSAGE_WINDOW_MS = 180_000L
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         _connected.value = true
+        // Catch fresh notifications posted during a temporary disconnection.
+        // The same freshness, sender, permission and durable receipt checks apply.
+        runCatching { activeNotifications }.getOrNull().orEmpty()
+            .filter { it.packageName == "com.whatsapp" }
+            .forEach { onNotificationPosted(it) }
     }
 
     override fun onListenerDisconnected() {
@@ -103,7 +107,7 @@ class WhatsAppListener : NotificationListenerService() {
         // messages.lastOrNull() used to silently drop intermediate messages.
         for (message in style.messages.takeLast(MAX_PENDING_PER_CONTACT)) {
             val time = message.timestamp
-            if (time <= 0L || now - time !in -10_000L..FRESH_MESSAGE_WINDOW_MS) continue
+            if (!ReplyFreshness.isFresh(time, now)) continue
             val person = message.person ?: continue
             if (!IncomingReplySafety.isDefinitelyIncoming(
                     person.name?.toString(), person.key,
@@ -171,7 +175,7 @@ class WhatsAppListener : NotificationListenerService() {
 
             if (!_connected.value || !ListenerRecovery.hasAccess(this) ||
                 lastActions[notificationKey] == null || receipts.isOutgoing(chat, body) ||
-                System.currentTimeMillis() - timestamp !in -10_000L..FRESH_MESSAGE_WINDOW_MS) return
+                !ReplyFreshness.isFresh(timestamp)) return
             val apiKey = SecretStore(applicationContext).read() ?: return
             if (cfg.mode == ReplyMode.AUTOMATIC) {
                 if (cfg.sent >= cfg.dailyLimit) return
@@ -213,15 +217,13 @@ class WhatsAppListener : NotificationListenerService() {
                     val delaySatisfied = current.instantReplies ||
                         System.currentTimeMillis() - (lastSent[chat] ?: 0L) >=
                         current.cooldownMinutes * 60_000L
-                    if (SendSafety.permits(current, chat, group, body, draft) && current.mode == ReplyMode.AUTOMATIC &&
-                        (!group || current.includeGroups) &&
-                        current.sent < current.dailyLimit && delaySatisfied &&
-                        ContactRules.isPermitted(chat, current.allowed, current.blocked, current.allowAll) &&
-                        !ReplyLoopGuard.shouldIgnore(chat, body)) {
+                    if (SendSafety.permits(current, chat, group, body, draft) &&
+                        current.mode == ReplyMode.AUTOMATIC && delaySatisfied &&
+                        !ReplyLoopGuard.shouldIgnore(chat, body) && !receipts.isOutgoing(chat, body)) {
                         stage = ReplyStage.SEND
                         currentCoroutineContext().ensureActive()
                         if (!_connected.value || !ListenerRecovery.hasAccess(this) ||
-                            System.currentTimeMillis() - timestamp > FRESH_MESSAGE_WINDOW_MS) return@withLock
+                            !ReplyFreshness.isFresh(timestamp)) return@withLock
                         val currentAction = lastActions[notificationKey] ?: return@withLock
                         if (ReplyTransport.send(applicationContext, currentAction, draft, chat)) {
                             ConversationMemory.record(chat, body, draft)

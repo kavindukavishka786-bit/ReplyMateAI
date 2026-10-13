@@ -58,7 +58,7 @@ class IncomingReceiptGuard internal constructor(context: Context) {
                 }
             }
         }.onFailure { readable = false }
-        if (entries.size > MAX_RECEIPTS) entries.subList(0, entries.size - MAX_RECEIPTS).clear()
+        if (entries.size > MAX_RECEIPTS) readable = false
     }
 
     private fun digest(value: String): String {
