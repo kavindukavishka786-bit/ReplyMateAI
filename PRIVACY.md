@@ -1,0 +1,9 @@
+# ReplyMate AI privacy notice (self-hosted build)
+
+This example app has no ads, analytics SDK, tracking SDK or independent backend. It listens to Android notifications only after the user explicitly grants notification access. This OS-level permission is powerful and may allow access to notifications from applications other than WhatsApp, even though this source code checks the notification package ID before reading its message text.
+
+On a matching WhatsApp message, the app uses the display name and newest notification text to request a reply from Google's Gemini API. It also sends the owner's configurable personality instructions. Google handles the request under its own API privacy terms; free-tier inputs may be used for product improvement. The app does not upload a full WhatsApp chat history or contact book. Do not enable the app for confidential conversations.
+
+On-device storage contains: notification settings, exact-match allow/block display names, personality instructions, local daily counters and an API key encrypted with the Android Keystore. Incoming messages and generated review drafts remain in process memory only, not a persistent database. Manual drafts can disappear if Android terminates the process. On app removal, the key and settings are removed (Android backup is disabled).
+
+The developer cannot guarantee delivery or WhatsApp account safety; experimental automation may violate platform policies. The user must explicitly turn on the master switch, then separately confirm any automatic-reply mode. Default settings are OFF, manual review, and approved-contacts-only.
