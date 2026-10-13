@@ -10,23 +10,28 @@ import org.json.JSONObject
 /**
  * Deduplicates WhatsApp notification refreshes BEFORE generating/sending AI replies.
  *
- * Exact notifications are blocked for 15 minutes; changed Android timestamps with
- * identical sender+body are suppressed for only 12 seconds. That short coalescing
- * window avoids the common double-send from notification refreshes, but genuinely
- * repeated identical messages during it may be skipped.
+ * Exact and timestamp-changed notifications are blocked for 15 minutes.
+ * WhatsApp exposes no stable message ID, so identical text from the same sender
+ * during this window is intentionally treated as ambiguous and skipped.
+ * Reservations are synchronously committed on IO BEFORE Gemini or a send.
  *
  * Persist ONLY salted digests and receipt times, never message text/contact names.
  */
-class IncomingReceiptGuard(context: Context) {
+class IncomingReceiptGuard internal constructor(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
     private data class Item(val exact: String, val loose: String, val at: Long)
     private val entries = ArrayList<Item>(256)
     private val key: ByteArray
+    private var saltPersisted = true
 
     companion object {
-        private const val EXACT_TTL_MS = 15 * 60_000L
-        private const val REFRESH_TTL_MS = 12_000L
-        private const val MAX_RECEIPTS = 256
+        private const val EXACT_TTL_MS = ReceiptPolicy.RETAIN_MS
+        private const val MAX_RECEIPTS = 1024
+        @Volatile private var instance: IncomingReceiptGuard? = null
+
+        fun getInstance(context: Context): IncomingReceiptGuard = instance ?: synchronized(this) {
+            instance ?: IncomingReceiptGuard(context.applicationContext).also { instance = it }
+        }
     }
 
     init {
@@ -35,7 +40,7 @@ class IncomingReceiptGuard(context: Context) {
             Base64.decode(existing, Base64.NO_WRAP)
         } else {
             ByteArray(32).also { SecureRandom().nextBytes(it) }.also {
-                prefs.edit().putString("salt", Base64.encodeToString(it, Base64.NO_WRAP)).apply()
+                saltPersisted = prefs.edit().putString("salt", Base64.encodeToString(it, Base64.NO_WRAP)).commit()
             }
         }
         val saved = prefs.getString("receipts", "[]") ?: "[]"
@@ -70,13 +75,34 @@ class IncomingReceiptGuard(context: Context) {
         val loose = digest(header + normalized)
         val exact = digest(header + timestamp.toString() + "|" + normalized)
         if (ReceiptPolicy.isDuplicate(entries.map { Triple(it.exact, it.loose, it.at) },
-                exact, loose, now, REFRESH_TTL_MS)) return false
+                exact, loose, now)) return false
+        // Never evict a live reservation: a full guard fails closed.
+        if (entries.size >= MAX_RECEIPTS) return false
         entries.add(Item(exact, loose, now))
-        if (entries.size > MAX_RECEIPTS) entries.subList(0, entries.size - MAX_RECEIPTS).clear()
+        return persist()
+    }
+
+    @Synchronized
+    fun markOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
+        entries.removeAll { now - it.at !in 0L..EXACT_TTL_MS }
+        val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
+        entries.removeAll { it.exact == hash }
+        if (entries.size >= MAX_RECEIPTS) return false
+        entries.add(Item(hash, hash, now))
+        return persist()
+    }
+
+    @Synchronized
+    fun isOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
+        val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
+        return entries.any { it.exact == hash && now - it.at in 0L..10 * 60_000L }
+    }
+
+    private fun persist(): Boolean {
         val arr = JSONArray()
         entries.forEach { arr.put(JSONObject()
             .put("exact", it.exact).put("loose", it.loose).put("at", it.at)) }
-        prefs.edit().putString("receipts", arr.toString()).apply()
-        return true
+        // A disk failure must not permit a send that could repeat after a restart.
+        return saltPersisted && prefs.edit().putString("receipts", arr.toString()).commit()
     }
 }

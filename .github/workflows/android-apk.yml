@@ -2,6 +2,7 @@ name: Build ReplyMate APK
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -31,7 +32,38 @@ jobs:
         with:
           gradle-version: '8.13'
       - name: Test and compile APK
-        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
+      - name: Verify APK signature and identity
+        run: |
+          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          "$SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK" | tee apk-signature.txt
+          "$SDK_ROOT/build-tools/35.0.0/aapt" dump badging "$APK" | tee apk-metadata.txt
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          text = Path('apk-metadata.txt').read_text()
+          build = Path('app/build.gradle.kts').read_text()
+          version = re.search(r'versionName = "([^"]+)"', build).group(1)
+          code = re.search(r'versionCode = (\d+)', build).group(1)
+          assert "package: name='com.replymate.ai'" in text
+          assert f"versionName='{version}'" in text and f"versionCode='{code}'" in text
+          assert "sdkVersion:'26'" in text and "targetSdkVersion:'35'" in text
+          assert "launchable-activity: name='com.replymate.ai.MainActivity'" in text
+          PY
+          sha256sum "$APK" | tee apk-sha256.txt
+      - name: Upload test and verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReplyMate-Verification-Reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.*
+            apk-signature.txt
+            apk-metadata.txt
+            apk-sha256.txt
       - name: Upload installable APK
         if: success()
         uses: actions/upload-artifact@v4
