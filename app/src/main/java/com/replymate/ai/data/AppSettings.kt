@@ -22,7 +22,8 @@ data class AppSettings(
     val allowed: String = "",
     val blocked: String = "",
     val includeGroups: Boolean = false,
-    val personality: String = "Warm, brief, respectful. Reply in the sender's language. Identify as an AI assistant. Never make promises, share private facts or invent arrangements.",
+    val personality: String = "Friendly, warm and relaxed. Understand each incoming message and respond naturally. Never copy the sender or invent personal facts.",
+    val ownerContext: String = "",
     val dailyLimit: Int = 20,
     val cooldownMinutes: Int = 15,
     val generated: Int = 0,
@@ -40,6 +41,7 @@ class SettingsRepository(private val context: Context) {
         val blocked = stringPreferencesKey("blocked")
         val groups = booleanPreferencesKey("groups")
         val personality = stringPreferencesKey("personality")
+        val ownerContext = stringPreferencesKey("owner_context")
         val dailyLimit = intPreferencesKey("daily_limit")
         val cooldown = intPreferencesKey("cooldown")
         val generated = intPreferencesKey("generated")
@@ -58,6 +60,7 @@ class SettingsRepository(private val context: Context) {
             blocked = p[Keys.blocked] ?: "",
             includeGroups = p[Keys.groups] ?: false,
             personality = p[Keys.personality] ?: AppSettings().personality,
+            ownerContext = p[Keys.ownerContext] ?: "",
             dailyLimit = p[Keys.dailyLimit] ?: 20,
             cooldownMinutes = p[Keys.cooldown] ?: 15,
             generated = if (p[Keys.date] == today) p[Keys.generated] ?: 0 else 0,
@@ -74,6 +77,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setBlocked(value: String) = edit(Keys.blocked, value)
     suspend fun setGroups(value: Boolean) = edit(Keys.groups, value)
     suspend fun setPersonality(value: String) = edit(Keys.personality, value)
+    suspend fun setOwnerContext(value: String) = edit(Keys.ownerContext, value.take(700))
     suspend fun setDailyLimit(value: Int) = edit(Keys.dailyLimit, value.coerceIn(1, 50))
     suspend fun setCooldown(value: Int) = edit(Keys.cooldown, value.coerceIn(1, 120))
 
