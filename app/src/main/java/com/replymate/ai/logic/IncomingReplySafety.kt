@@ -35,17 +35,14 @@ object IncomingReplySafety {
 }
 
 /**
- * Defense in depth: marks outgoing text BEFORE invoking WhatsApp RemoteInput.
- * Drops all notification updates for a recipient during a 20-second feedback window;
- * after that, matching outgoing text stays blocked for 10 minutes. No raw text saved.
- *
- * This is process-memory only, and may cause an immediate real incoming message to
- * be skipped. Safety takes priority over replying to every notification.
+ * Stop outgoing messages from recursively triggering their own replies.
+ * Only EXACT text matches are blocked; unlike earlier releases,
+ * genuine new inbound messages are NOT delayed for an arbitrary 20 seconds.
+ * Digests only; no outgoing text saved, and sender validation remains mandatory.
  */
 object ReplyLoopGuard {
     private data class Outgoing(val messageDigest: String, val sentAt: Long)
     private val recent = mutableMapOf<String, MutableList<Outgoing>>()
-    private const val QUIET_MS = 20_000L
     private const val RETAIN_MS = 10 * 60_000L
 
     private fun digest(value: String): String {
@@ -68,7 +65,7 @@ object ReplyLoopGuard {
     fun shouldIgnore(recipient: String, body: String, now: Long = System.currentTimeMillis()): Boolean {
         prune(now)
         val entries = recent[who(recipient)] ?: return false
-        return entries.any { now - it.sentAt in 0 until QUIET_MS || it.messageDigest == what(body) }
+        return entries.any { it.messageDigest == what(body) }
     }
 
     private fun prune(now: Long) {
