@@ -8,76 +8,84 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Callable
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import org.json.JSONArray
+import org.json.JSONObject
+import java.security.MessageDigest
+import android.util.Base64
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28, 34])
 class IncomingReceiptGuardTest {
-    private lateinit var context: Context
-    @Before fun clear() {
-        context = RuntimeEnvironment.getApplication()
-        context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit().clear().commit()
-    }
+    private val context get() = RuntimeEnvironment.getApplication()
+    @Before fun clear() { context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit().clear().commit() }
 
-    @Test fun delayedChangedTimestampRefreshIsBlockedAfterReload() {
-        val now = System.currentTimeMillis()
-        val first = IncomingReceiptGuard(context)
-        assertTrue(first.accept("Alex", "Alex", now, "Meet at 4?", now))
-        val reloaded = IncomingReceiptGuard(context)
-        assertFalse(reloaded.accept("Alex", "Alex", now + 90_000, "Meet at 4?", now + 90_000))
-        assertTrue(reloaded.accept("Alex", "Alex", now + 90_001, "Actually 5?", now + 90_001))
-    }
-
-    @Test fun concurrentRefreshesReserveOnlyOnce() {
+    @Test fun delayedRefreshAndRestartNeverReadmitTheSameBody() {
         val guard = IncomingReceiptGuard(context)
-        val now = System.currentTimeMillis()
-        val start = CountDownLatch(1)
-        val workers = Executors.newFixedThreadPool(4)
+        assertTrue(guard.accept("Alice", "alice", 1_000, "How are you?", 10_000))
+        // Regression: 1.5.0 accepts this changed timestamp after 12 seconds.
+        assertFalse(guard.accept("Alice", "alice", 2_000, "How are you?", 45_000))
+        assertFalse(IncomingReceiptGuard(context).accept("Alice", "alice", 3_000, "How are you?", 120_000))
+        // Alias remains blocked beyond the loose content window.
+        assertFalse(IncomingReceiptGuard(context).accept("Alice", "alice", 2_000, "How are you?", 400_000))
+    }
+
+    @Test fun differentBodyAndDifferentConversationAreIndependent() {
+        val guard = IncomingReceiptGuard(context)
+        assertTrue(guard.accept("chat-1", "alice", 1_000, "Hi", 10_000))
+        assertTrue(guard.accept("chat-1", "alice", 2_000, "What time?", 11_000))
+        assertTrue(guard.accept("chat-2", "alice", 1_000, "Hi", 11_000))
+        assertFalse(guard.accept("chat-1", "alice", 3_000, "Hi", 11_000))
+        assertTrue(guard.accept("chat-1", "alice", 4_000, "Hi", 200_000))
+    }
+
+    @Test fun concurrentGuardInstancesAdmitOneReceiptOnly() {
+        val pool = Executors.newFixedThreadPool(8)
         try {
-            val results = (1..8).map { index -> workers.submit<Boolean> {
-                start.await()
-                guard.accept("Alex", "Alex", now + index, "Hello there", now + index)
-            } }
-            start.countDown()
-            assertEquals(1, results.count { it.get(10, TimeUnit.SECONDS) })
-        } finally { workers.shutdownNow() }
+            val calls = (1..16).map { Callable { IncomingReceiptGuard(context)
+                .accept("chat", "author", 1_000, "Hello", 10_000) } }
+            assertEquals(1, pool.invokeAll(calls).count { it.get() })
+        } finally { pool.shutdownNow() }
     }
 
-    @Test fun outgoingEchoSurvivesRestartWithoutStoringPlaintext() {
-        val now = System.currentTimeMillis()
-        val guard = IncomingReceiptGuard(context)
-        assertTrue(guard.markOutgoing("Private Contact", "My private response", now))
-        assertTrue(guard.accept("Private Contact", "Private Contact", now, "Secret question", now))
-        val reloaded = IncomingReceiptGuard(context)
-        assertTrue(reloaded.isOutgoing("Private Contact", "You: My private response", now + 60_000))
-        assertFalse(reloaded.isOutgoing("Another Contact", "My private response", now + 60_000))
-        assertFalse(reloaded.isOutgoing("Private Contact", "A new question", now + 60_000))
-        assertFalse(reloaded.isOutgoing("Private Contact", "My private response", now + 600_001))
-        val stored = context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).all.toString()
-        assertFalse(stored.contains("Private Contact"))
-        assertFalse(stored.contains("My private response"))
-        assertFalse(stored.contains("Secret question"))
+    @Test fun legacyVersion150ReceiptIsRespectedWhenShortcutAndAuthorKeyAppear() {
+        val key = ByteArray(32) { it.toByte() }
+        fun hash(value: String) = MessageDigest.getInstance("SHA-256")
+            .digest(key + value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        val legacy = JSONArray().put(JSONObject().put("exact", hash("Alice|Alice|1000|hello"))
+            .put("loose", hash("Alice|Alice|hello")).put("at", 10_000L))
+        context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit()
+            .putString("salt", Base64.encodeToString(key, Base64.NO_WRAP))
+            .putString("receipts", legacy.toString()).commit()
+        assertFalse(IncomingReceiptGuard(context).accept("shortcut-id", "person-key", 1_000, "Hello",
+            20_000, legacyChat = "Alice", legacyAuthor = "Alice"))
     }
 
-    @Test fun corruptedReceiptsAndClockRollbackFailClosed() {
+    @Test fun fullReceiptStorageDoesNotEvictAndReplayLiveMessages() {
+        val rows = JSONArray()
+        repeat(2048) { rows.put(JSONObject().put("exact", "event-$it").put("loose", "body-$it").put("at", 10_000L)) }
+        context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).edit()
+            .putString("receipts", rows.toString()).commit()
+        assertFalse(IncomingReceiptGuard(context).accept("chat", "author", 1_000, "Hello", 20_000))
+        assertEquals(2048, JSONArray(context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
+            .getString("receipts", "[]")).length())
+    }
+
+    @Test fun storedReceiptsContainNoMessageOrContactText() {
+        assertTrue(IncomingReceiptGuard(context).accept("Private Contact", "Secret Author", 1_000, "Secret text", 10_000))
+        val value = context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE).getString("receipts", "")!!
+        assertFalse(value.contains("Private Contact")); assertFalse(value.contains("Secret Author")); assertFalse(value.contains("Secret text"))
+        assertEquals(1, JSONArray(value).length())
+    }
+
+    @Test fun corruptedStorageAndClockRollbackFailClosed() {
         val prefs = context.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
         prefs.edit().putString("receipts", "broken").commit()
-        val now = System.currentTimeMillis()
-        assertFalse(IncomingReceiptGuard(context).accept("Alex", "Alex", now, "Hello", now))
+        assertFalse(IncomingReceiptGuard(context).accept("chat", "author", 1_000, "Hello", 10_000))
         prefs.edit().clear().commit()
         val guard = IncomingReceiptGuard(context)
-        assertTrue(guard.accept("Alex", "Alex", now, "Hello", now))
-        assertFalse(guard.accept("Alex", "Alex", now + 1, "New question", now - 1))
-    }
-
-    @Test fun reservationsExpireAndOtherContactsAreIndependent() {
-        val now = System.currentTimeMillis()
-        val guard = IncomingReceiptGuard(context)
-        assertTrue(guard.accept("Alex", "Alex", now, "hello", now))
-        assertTrue(guard.accept("Sam", "Sam", now, "hello", now))
-        assertFalse(guard.accept("Alex", "Alex", now + 10, " HELLO ", now + 800_000))
-        assertTrue(guard.accept("Alex", "Alex", now + 900_001, "hello", now + 900_001))
+        assertTrue(guard.accept("chat", "author", 1_000, "Hello", 10_000))
+        assertFalse(guard.accept("chat", "author", 2_000, "Hello", 5_000))
     }
 }

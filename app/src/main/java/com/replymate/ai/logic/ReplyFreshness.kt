@@ -1,8 +1,7 @@
 package com.replymate.ai.logic
 
-/** Checked at notification arrival, after queueing and immediately before a send. */
+/** Do not dispatch queued work that has become too old or has an invalid clock. */
 object ReplyFreshness {
-    private const val WINDOW_MS = 180_000L
     fun isFresh(timestamp: Long, now: Long = System.currentTimeMillis()): Boolean =
-        timestamp > 0L && now - timestamp in -10_000L..WINDOW_MS
+        timestamp > 0 && now - timestamp in -10_000L..180_000L
 }

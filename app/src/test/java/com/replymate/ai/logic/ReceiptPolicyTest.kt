@@ -13,15 +13,8 @@ class ReceiptPolicyTest {
 
     @Test fun originalReceiptStaysBlockedAfterRefreshWindow() {
         val previous = listOf(Triple("original", "body-hash", 1_000L))
-        assertTrue(ReceiptPolicy.isDuplicate(previous, "original", "body-hash", 75_000L))
-        assertTrue(ReceiptPolicy.isDuplicate(previous, "a-new-message-event", "body-hash", 75_000L))
-    }
-
-    @Test fun delayedRefreshAndRestartCannotRepeatButExpiredReceiptCan() {
-        val previous = listOf(Triple("event-a", "same-content", 10_000L))
-        assertTrue(ReceiptPolicy.isDuplicate(previous, "refreshed-at-90-seconds", "same-content", 100_000L))
-        assertTrue(ReceiptPolicy.isDuplicate(previous, "after-restart", "same-content", 500_000L))
-        assertFalse(ReceiptPolicy.isDuplicate(previous, "after-expiry", "same-content", 910_001L))
+        assertTrue(ReceiptPolicy.isDuplicate(previous, "original", "body-hash", 200_000L))
+        assertFalse(ReceiptPolicy.isDuplicate(previous, "a-new-message-event", "body-hash", 200_000L))
     }
 
     @Test fun differentMessagesStillReplyImmediately() {

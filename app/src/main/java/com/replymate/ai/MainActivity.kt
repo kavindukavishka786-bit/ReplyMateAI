@@ -97,6 +97,7 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
     val serviceError by BackgroundStatus.error.collectAsStateWithLifecycle()
     var restartAfterBoot by remember { mutableStateOf(BackgroundStatus.restartAfterBoot(ctx)) }
     var batteryUnrestricted by remember { mutableStateOf(false) }
+    var batterySaver by remember { mutableStateOf(false) }
     var resumed by remember { mutableStateOf(false) }
     var tab by remember { mutableStateOf(Tab.HOME) }
     LaunchedEffect(reviewOpenSequence) { if (reviewOpenSequence > 0) tab = Tab.REVIEWS }
@@ -111,6 +112,7 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
         notificationGranted = BackgroundStatus.notificationsAllowed(ctx)
         batteryUnrestricted = (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager)
             .isIgnoringBatteryOptimizations(ctx.packageName)
+        batterySaver = (ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager).isPowerSaveMode
         hasKey = secrets.hasKey()
         // User previously enabled the visible keep-alive; if the OS killed
         // that service, recover only while this Activity is visible.
@@ -178,7 +180,7 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                     Tab.HOME -> HomeScreen(settings, listenerGranted, notificationGranted, hasKey, reviews.size,
                         listenerConnected = listenerConnected, backgroundRunning = backgroundRunning,
                         backgroundError = backgroundError.ifBlank { serviceError },
-                        batteryUnrestricted = batteryUnrestricted, restartAfterBoot = restartAfterBoot,
+                        batteryUnrestricted = batteryUnrestricted, batterySaver = batterySaver, restartAfterBoot = restartAfterBoot,
                         onRestartAfterBoot = { restartAfterBoot = it; BackgroundStatus.setRestartAfterBoot(ctx, it) },
                         onAppSettings = {
                             runCatching { ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
@@ -289,7 +291,7 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
                        onEnable: (Boolean) -> Unit, onManual: () -> Unit, onAuto: () -> Unit,
                        onStartBackground: () -> Unit, onStopBackground: () -> Unit,
                        onBatterySettings: () -> Unit, onAppSettings: () -> Unit,
-                       batteryUnrestricted: Boolean, restartAfterBoot: Boolean,
+                       batteryUnrestricted: Boolean, batterySaver: Boolean, restartAfterBoot: Boolean,
                        onRestartAfterBoot: (Boolean) -> Unit,
                        onListener: () -> Unit, onNotification: () -> Unit,
                        onConfigureKey: () -> Unit, onSeeReviews: () -> Unit) {
@@ -362,6 +364,7 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
         Text(if (batteryUnrestricted) "Battery optimization: unrestricted"
              else "Battery optimization is active. Select ReplyMate and choose Unrestricted / Don't optimize.",
              fontSize = 11.sp, color = if (batteryUnrestricted) Mint else Warm)
+        if (batterySaver) Text("Battery Saver is on; background notifications may be delayed.", color = Warm, fontSize = 11.sp)
         OutlinedButton(onClick = onAppSettings, modifier = Modifier.fillMaxWidth()) {
             Text("Open app settings")
         }

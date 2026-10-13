@@ -20,6 +20,7 @@ data class PendingReply(
     val draft: String,
     val action: Notification.Action,
     val group: Boolean = false,
+    val conversation: String = sender,
     val timestamp: Long = System.currentTimeMillis()
 )
 
@@ -30,9 +31,9 @@ object ReplyQueue {
     private val internal = MutableStateFlow<List<PendingReply>>(emptyList())
     val items = internal.asStateFlow()
 
-    @Synchronized fun add(sender: String, incoming: String, draft: String, action: Notification.Action, group: Boolean = false): String {
+    @Synchronized fun add(sender: String, incoming: String, draft: String, action: Notification.Action, group: Boolean = false, conversation: String = sender): String {
         val id = UUID.randomUUID().toString()
-        internal.value = (listOf(PendingReply(id, sender, incoming, draft, action, group)) + internal.value).take(10)
+        internal.value = (listOf(PendingReply(id, sender, incoming, draft, action, group, conversation)) + internal.value).take(10)
         return id
     }
 
@@ -52,13 +53,13 @@ object ReplyQueue {
         val age = System.currentTimeMillis() - draft.timestamp
         val repo = SettingsRepository(context.applicationContext)
         val current = repo.settings.first()
-        if (age !in 0L..5 * 60_000L || !ListenerRecovery.hasAccess(context) ||
+        if (age !in 0L..5 * 60_000L || !WhatsAppListener.isConnected || !ListenerRecovery.hasAccess(context) ||
             !SendSafety.permits(current, draft.sender, draft.group, draft.incoming, reply)) {
             return@withLock false
         }
         val sent = ReplyTransport.send(context, draft.action, reply, draft.sender)
         if (sent) {
-            ConversationMemory.record(draft.sender, draft.incoming, reply)
+            ConversationMemory.record(draft.conversation, draft.incoming, reply)
             repo.countSent()
         }
         sent
@@ -72,7 +73,7 @@ object ReplyQueue {
 
 }
 
-object ReplySendGate { val mutex = Mutex() }
+object ReplySendGate { val mutex get() = ReplyDispatch.mutex }
 
 object ReplyTransport {
     /** Reply through WhatsApp's supplied notification PendingIntent, not a private API. */
@@ -87,7 +88,7 @@ object ReplyTransport {
         inputs.forEach { values.putCharSequence(it.resultKey, reply) }
         RemoteInput.addResultsToIntent(inputs.toTypedArray(), intent, values)
         // Register before PendingIntent.send: it can synchronously re-post WhatsApp notifications.
-        check(IncomingReceiptGuard.getInstance(context).markOutgoing(recipient, reply)) {
+        check(OutgoingReplyGuard(context).markOutgoing(recipient, reply)) {
             "Cannot safely record outgoing reply"
         }
         ReplyLoopGuard.markOutgoing(recipient, reply)

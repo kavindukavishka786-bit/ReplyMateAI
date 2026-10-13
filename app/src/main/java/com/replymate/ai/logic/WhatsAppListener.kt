@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
@@ -13,6 +14,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import com.replymate.ai.MainActivity
 import com.replymate.ai.data.ReplyMode
 import com.replymate.ai.data.SecretStore
@@ -20,14 +22,14 @@ import com.replymate.ai.data.SettingsRepository
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
@@ -47,16 +49,16 @@ class WhatsAppListener : NotificationListenerService() {
         val connected = _connected.asStateFlow()
         val isConnected: Boolean get() = _connected.value
         private const val MAX_PENDING_PER_CONTACT = 12
+        private const val MAX_INTAKE_PER_CONTACT = 128
+        private const val FRESH_MESSAGE_WINDOW_MS = 180_000L
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
         _connected.value = true
-        // Catch fresh notifications posted during a temporary disconnection.
-        // The same freshness, sender, permission and durable receipt checks apply.
-        runCatching { activeNotifications }.getOrNull().orEmpty()
-            .filter { it.packageName == "com.whatsapp" }
-            .forEach { onNotificationPosted(it) }
+        // Recover only fresh OS notifications after a transient disconnect. Receipts
+        // prevent replay of work already admitted before a process restart.
+        runCatching { activeNotifications }.getOrNull()?.forEach { onNotificationPosted(it) }
     }
 
     override fun onListenerDisconnected() {
@@ -68,16 +70,22 @@ class WhatsAppListener : NotificationListenerService() {
         // only if the user enabled background mode and permission still exists.
         // This is not a way around a user force-stop or revoked permission.
         if (BackgroundStatus.requested(applicationContext) &&
-            !BackgroundStatus.stoppedByUser(applicationContext)) ListenerRecovery.requestIfNeeded(this)
-
+            ReplyPermissions.listenerAllowed(this)) {
+            runCatching {
+                NotificationListenerService.requestRebind(ComponentName(this, WhatsAppListener::class.java))
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val sendMutex = ReplySendGate.mutex
+    // Shared with manual approval; accounting and dispatch never race.
+
+    private val intakeCounts = ConcurrentHashMap<String, AtomicInteger>()
+    private val intakeLocks = ConcurrentHashMap<String, Mutex>()
     private val senderLocks = ConcurrentHashMap<String, Mutex>()
     private val waitingCounts = ConcurrentHashMap<String, AtomicInteger>()
     private val lastActions = ConcurrentHashMap<String, Notification.Action>()
-    private val receipts by lazy { IncomingReceiptGuard.getInstance(applicationContext) }
+    private val receipts by lazy { IncomingReceiptGuard(applicationContext) }
     private val lastSent = ConcurrentHashMap<String, Long>()
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -96,10 +104,11 @@ class WhatsAppListener : NotificationListenerService() {
             !extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE).isNullOrBlank()
         val action = notification.actions?.firstOrNull { item ->
             item.actionIntent?.creatorPackage == "com.whatsapp" &&
-                item.remoteInputs?.any { it.allowFreeFormInput } == true &&
-                (Build.VERSION.SDK_INT < 28 || item.semanticAction == Notification.Action.SEMANTIC_ACTION_REPLY ||
-                    item.semanticAction == Notification.Action.SEMANTIC_ACTION_NONE)
+                item.remoteInputs?.any { it.allowFreeFormInput } == true
         } ?: return
+        // A shortcut ID separates conversations with identical display names when
+        // WhatsApp provides one. Never substitute a display name for a different action.
+        val conversation = notification.shortcutId?.takeIf { it.isNotBlank() } ?: chat
         lastActions[sbn.key] = action
         val now = System.currentTimeMillis()
 
@@ -107,7 +116,7 @@ class WhatsAppListener : NotificationListenerService() {
         // messages.lastOrNull() used to silently drop intermediate messages.
         for (message in style.messages.takeLast(MAX_PENDING_PER_CONTACT)) {
             val time = message.timestamp
-            if (!ReplyFreshness.isFresh(time, now)) continue
+            if (time <= 0L || now - time !in -10_000L..FRESH_MESSAGE_WINDOW_MS) continue
             val person = message.person ?: continue
             if (!IncomingReplySafety.isDefinitelyIncoming(
                     person.name?.toString(), person.key,
@@ -119,8 +128,11 @@ class WhatsAppListener : NotificationListenerService() {
                 body.matches(Regex("(?i)^\\d+ (new )?messages?$")) ||
                 ReplyLoopGuard.shouldIgnore(chat, body)) continue
 
-            enqueue(sbn.key, chat, person.name?.toString().orEmpty(), time, body, group)
-
+            // Android may re-post the SAME WhatsApp message with a different
+            // MessagingStyle timestamp. Guard both exact receipts and very recent
+            // same-body notification refreshes, persisting salted digests across restarts.
+            offer(sbn.key, conversation, chat, person.key?.takeIf { it.isNotBlank() }
+                ?: person.name?.toString().orEmpty(), person.name?.toString().orEmpty(), time, body, group, action)
         }
     }
 
@@ -128,14 +140,39 @@ class WhatsAppListener : NotificationListenerService() {
         if (sbn?.packageName == "com.whatsapp") lastActions.remove(sbn.key)
     }
 
-    private fun enqueue(notificationKey: String, chat: String, author: String,
-                        timestamp: Long, body: String, group: Boolean) {
-        val count = waitingCounts.computeIfAbsent(chat) { AtomicInteger(0) }
+    private fun offer(notificationKey: String, conversation: String, chat: String, author: String, authorName: String,
+                      timestamp: Long, body: String, group: Boolean, action: Notification.Action) {
+        val intakeCount = intakeCounts.computeIfAbsent(conversation) { AtomicInteger(0) }
+        if (intakeCount.incrementAndGet() > MAX_INTAKE_PER_CONTACT) {
+            intakeCount.decrementAndGet()
+            return
+        }
+        val intake = intakeLocks.computeIfAbsent(conversation) { Mutex() }
+        // Acquire in callback order, then move disk work off main. Duplicate refreshes
+        // must not occupy the bounded generation queue and crowd out a NEW message.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                intake.withLock {
+                    val admitted = withContext(Dispatchers.Default) {
+                        withContext(Dispatchers.IO) {
+                            ReplyFreshness.isFresh(timestamp) && receipts.accept(conversation, author,
+                                timestamp, body, legacyChat = chat, legacyAuthor = authorName)
+                        }
+                    }
+                    if (admitted) enqueue(notificationKey, conversation, chat, timestamp, body, group, action)
+                }
+            } finally { intakeCount.decrementAndGet() }
+        }
+    }
+
+    private fun enqueue(notificationKey: String, conversation: String, chat: String, timestamp: Long, body: String,
+                        group: Boolean, action: Notification.Action) {
+        val count = waitingCounts.computeIfAbsent(conversation) { AtomicInteger(0) }
         if (count.incrementAndGet() > MAX_PENDING_PER_CONTACT) {
             count.decrementAndGet()
             return
         }
-        val lock = senderLocks.computeIfAbsent(chat) { Mutex() }
+        val lock = senderLocks.computeIfAbsent(conversation) { Mutex() }
         // UNDISPATCHED acquires the per-contact mutex in notification arrival order.
         // CRITICAL: UNDISPATCHED starts executing on the caller's thread, which is
         // Android's main thread for NotificationListenerService callbacks. Switch
@@ -151,7 +188,7 @@ class WhatsAppListener : NotificationListenerService() {
                     // Force a *different* dispatcher first, then switch to IO.
                     withContext(Dispatchers.Default) {
                         withContext(Dispatchers.IO) {
-                            process(notificationKey, chat, author, timestamp, body, group)
+                            process(notificationKey, conversation, chat, timestamp, body, group, action)
                         }
                     }
                 }
@@ -161,31 +198,24 @@ class WhatsAppListener : NotificationListenerService() {
         }
     }
 
-    private suspend fun process(notificationKey: String, chat: String, author: String,
-                                timestamp: Long, body: String, group: Boolean) {
+    private suspend fun process(notificationKey: String, conversation: String, chat: String, timestamp: Long, body: String, group: Boolean, action: Notification.Action) {
         val repo = SettingsRepository(applicationContext)
         var stage = ReplyStage.LOAD_SETTINGS
         var wakeLock: PowerManager.WakeLock? = null
         try {
             val cfg = repo.settings.first()
             stage = ReplyStage.CHECK_PERMISSIONS
-            if (!cfg.enabled || (group && !cfg.includeGroups) ||
+            if (!ReplyFreshness.isFresh(timestamp) || !isConnected ||
+                !ReplyPermissions.listenerAllowed(this) || !cfg.enabled || (group && !cfg.includeGroups) ||
                 !ContactRules.isPermitted(chat, cfg.allowed, cfg.blocked, cfg.allowAll) ||
-                ReplyLoopGuard.shouldIgnore(chat, body)) return
+                ReplyLoopGuard.shouldIgnore(chat, body) || OutgoingReplyGuard(applicationContext).isOutgoing(chat, body)) return
 
-            if (!_connected.value || !ListenerRecovery.hasAccess(this) ||
-                lastActions[notificationKey] == null || receipts.isOutgoing(chat, body) ||
-                !ReplyFreshness.isFresh(timestamp)) return
             val apiKey = SecretStore(applicationContext).read() ?: return
             if (cfg.mode == ReplyMode.AUTOMATIC) {
                 if (cfg.sent >= cfg.dailyLimit) return
                 if (!cfg.instantReplies &&
-                    System.currentTimeMillis() - (lastSent[chat] ?: 0L) < cfg.cooldownMinutes * 60_000L) return
+                    System.currentTimeMillis() - (lastSent[conversation] ?: 0L) < cfg.cooldownMinutes * 60_000L) return
             }
-
-            // Reserve AFTER eligibility checks, on IO, before any external work.
-            // Shared across listener instances and committed before generation.
-            if (!receipts.accept(chat, author, timestamp, body)) return
 
             // Hold CPU awake only while processing; the lock expires automatically.
             wakeLock = runCatching {
@@ -197,37 +227,37 @@ class WhatsAppListener : NotificationListenerService() {
             stage = ReplyStage.GENERATE
             val draft = GeminiClient.draft(
                 apiKey, chat, body, cfg.personality, cfg.ownerContext,
-                ConversationMemory.recent(chat), cfg.modelId
+                ConversationMemory.recent(conversation), cfg.modelId
             )
             currentCoroutineContext().ensureActive()
-            if (!_connected.value || !ListenerRecovery.hasAccess(this)) return
             stage = ReplyStage.SAVE_DRAFT
             repo.countGenerated()
 
             stage = ReplyStage.CONFIRM
             val latest = repo.settings.first()
-            if (!latest.enabled || (group && !latest.includeGroups) ||
+            if (!ReplyFreshness.isFresh(timestamp) || !isConnected ||
+                !ReplyPermissions.listenerAllowed(this) || !latest.enabled || (group && !latest.includeGroups) ||
                 !ContactRules.isPermitted(chat, latest.allowed, latest.blocked, latest.allowAll) ||
-                ReplyLoopGuard.shouldIgnore(chat, body)) return
+                ReplyLoopGuard.shouldIgnore(chat, body) || OutgoingReplyGuard(applicationContext).isOutgoing(chat, body)) return
 
             if (latest.mode == ReplyMode.AUTOMATIC) {
-                sendMutex.withLock {
+                ReplyDispatch.mutex.withLock {
                     stage = ReplyStage.CONFIRM
                     val current = repo.settings.first()
                     val delaySatisfied = current.instantReplies ||
-                        System.currentTimeMillis() - (lastSent[chat] ?: 0L) >=
+                        System.currentTimeMillis() - (lastSent[conversation] ?: 0L) >=
                         current.cooldownMinutes * 60_000L
-                    if (SendSafety.permits(current, chat, group, body, draft) &&
+                    if (ReplyFreshness.isFresh(timestamp) && isConnected &&
+                        ReplyPermissions.listenerAllowed(this) &&
+                        SendSafety.permits(current, chat, group, body, draft) &&
                         current.mode == ReplyMode.AUTOMATIC && delaySatisfied &&
-                        !ReplyLoopGuard.shouldIgnore(chat, body) && !receipts.isOutgoing(chat, body)) {
+                        !ReplyLoopGuard.shouldIgnore(chat, body)) {
                         stage = ReplyStage.SEND
                         currentCoroutineContext().ensureActive()
-                        if (!_connected.value || !ListenerRecovery.hasAccess(this) ||
-                            !ReplyFreshness.isFresh(timestamp)) return@withLock
                         val currentAction = lastActions[notificationKey] ?: return@withLock
                         if (ReplyTransport.send(applicationContext, currentAction, draft, chat)) {
-                            ConversationMemory.record(chat, body, draft)
-                            lastSent[chat] = System.currentTimeMillis()
+                            ConversationMemory.record(conversation, body, draft)
+                            lastSent[conversation] = System.currentTimeMillis()
                             stage = ReplyStage.RECORD
                             repo.countSent()
                         } else {
@@ -240,7 +270,7 @@ class WhatsAppListener : NotificationListenerService() {
             } else if (latest.mode == ReplyMode.MANUAL) {
                 stage = ReplyStage.SAVE_DRAFT
                 val currentAction = lastActions[notificationKey] ?: return
-                val id = ReplyQueue.add(chat, body, draft, currentAction, group)
+                val id = ReplyQueue.add(chat, body, draft, currentAction, group, conversation)
                 showDraftNotification(chat, id)
             }
         } catch (cancelled: CancellationException) {

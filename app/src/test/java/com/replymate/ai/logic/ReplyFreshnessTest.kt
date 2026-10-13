@@ -4,8 +4,7 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ReplyFreshnessTest {
-    @Test fun queuedMessageCanExpireBeforeDispatch() {
-        assertTrue(ReplyFreshness.isFresh(1_000, 2_000))
+    @Test fun expiredQueuedRepliesAreBlocked() {
         assertTrue(ReplyFreshness.isFresh(1_000, 181_000))
         assertFalse(ReplyFreshness.isFresh(1_000, 181_001))
         assertFalse(ReplyFreshness.isFresh(0, 1_000))

@@ -8,105 +8,65 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Deduplicates WhatsApp notification refreshes BEFORE generating/sending AI replies.
- *
- * Exact and timestamp-changed notifications are blocked for 15 minutes.
- * WhatsApp exposes no stable message ID, so identical text from the same sender
- * during this window is intentionally treated as ambiguous and skipped.
- * Reservations are synchronously committed on IO BEFORE Gemini or a send.
- *
- * Persist ONLY salted digests and receipt times, never message text/contact names.
+ * Durable, process-wide at-most-once admission, before Gemini or direct reply.
+ * Only salted digests and times are stored. Call on IO, never on the UI callback.
+ * Timestamp aliases of suppressed refreshes are also saved. Identical sender+body
+ * is coalesced for three minutes after its latest notification; deliberately repeated
+ * identical messages in that window can be skipped. Different bodies proceed normally.
  */
-class IncomingReceiptGuard internal constructor(context: Context) {
+class IncomingReceiptGuard(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("incoming_receipts", Context.MODE_PRIVATE)
-    private data class Item(val exact: String, val loose: String, val at: Long)
-    private val entries = ArrayList<Item>(256)
-    private val key: ByteArray
-    private var saltPersisted = true
-    private var readable = true
-
     companion object {
-        private const val EXACT_TTL_MS = ReceiptPolicy.RETAIN_MS
-        private const val MAX_RECEIPTS = 1024
-        @Volatile private var instance: IncomingReceiptGuard? = null
-
-        fun getInstance(context: Context): IncomingReceiptGuard = instance ?: synchronized(this) {
-            instance ?: IncomingReceiptGuard(context.applicationContext).also { instance = it }
-        }
+        private val lock = Any()
+        private const val EXACT_TTL_MS = 15 * 60_000L
+        private const val MAX_RECEIPTS = 2048
     }
 
-    init {
-        val existing = prefs.getString("salt", null)
-        key = if (existing != null) {
-            Base64.decode(existing, Base64.NO_WRAP)
-        } else {
-            ByteArray(32).also { SecureRandom().nextBytes(it) }.also {
-                saltPersisted = prefs.edit().putString("salt", Base64.encodeToString(it, Base64.NO_WRAP)).commit()
-            }
-        }
-        val saved = prefs.getString("receipts", "[]") ?: "[]"
-        runCatching {
-            val arr = JSONArray(saved)
-            val now = System.currentTimeMillis()
-            for (i in 0 until arr.length()) {
-                val row = arr.optJSONObject(i) ?: continue
-                val at = row.optLong("at", 0L)
-                val exact = row.optString("exact", "")
-                val loose = row.optString("loose", "")
-                if (exact.isNotBlank() && loose.isNotBlank() && now - at <= EXACT_TTL_MS) {
-                    entries.add(Item(exact, loose, at))
-                }
-            }
-        }.onFailure { readable = false }
-        if (entries.size > MAX_RECEIPTS) readable = false
-    }
-
-    private fun digest(value: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256")
-            .digest(key + value.toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
-    @Synchronized
     fun accept(chat: String, author: String, timestamp: Long, message: String,
-               now: Long = System.currentTimeMillis()): Boolean {
-        if (!readable || entries.any { now < it.at }) return false
-        entries.removeAll { now - it.at > EXACT_TTL_MS }
-        val header = chat.trim() + "|" + author.trim() + "|"
-        val normalized = IncomingReplySafety.normalizedBody(message)
-        val loose = digest(header + normalized)
-        val exact = digest(header + timestamp.toString() + "|" + normalized)
-        if (ReceiptPolicy.isDuplicate(entries.map { Triple(it.exact, it.loose, it.at) },
-                exact, loose, now)) return false
-        // Never evict a live reservation: a full guard fails closed.
-        if (entries.size >= MAX_RECEIPTS) return false
-        entries.add(Item(exact, loose, now))
-        return persist()
-    }
-
-    @Synchronized
-    fun markOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
-        if (!readable || entries.any { now < it.at }) return false
-        entries.removeAll { now - it.at > EXACT_TTL_MS }
-        val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
-        entries.removeAll { it.exact == hash }
-        if (entries.size >= MAX_RECEIPTS) return false
-        entries.add(Item(hash, hash, now))
-        return persist()
-    }
-
-    @Synchronized
-    fun isOutgoing(chat: String, message: String, now: Long = System.currentTimeMillis()): Boolean {
-        if (!readable || entries.any { now < it.at }) return true
-        val hash = digest("outgoing|" + chat.trim() + "|" + IncomingReplySafety.normalizedBody(message))
-        return entries.any { it.exact == hash && now - it.at in 0L..10 * 60_000L }
-    }
-
-    private fun persist(): Boolean {
-        val arr = JSONArray()
-        entries.forEach { arr.put(JSONObject()
-            .put("exact", it.exact).put("loose", it.loose).put("at", it.at)) }
-        // A disk failure must not permit a send that could repeat after a restart.
-        return saltPersisted && prefs.edit().putString("receipts", arr.toString()).commit()
+               now: Long = System.currentTimeMillis(),
+               legacyChat: String = chat, legacyAuthor: String = author): Boolean = synchronized(lock) {
+        try {
+            val salt = prefs.getString("salt", null)
+            val key = if (salt != null) Base64.decode(salt, Base64.NO_WRAP) else {
+                val created = ByteArray(32).also { SecureRandom().nextBytes(it) }
+                if (!prefs.edit().putString("salt", Base64.encodeToString(created, Base64.NO_WRAP)).commit())
+                    return@synchronized false
+                created
+            }
+            require(key.size == 32)
+            fun digest(value: String): String = MessageDigest.getInstance("SHA-256")
+                .digest(key + value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+            // JSON encoding avoids ambiguous separators in names/body.
+            val identity = JSONArray().put(chat.trim()).put(author.trim())
+                .put(IncomingReplySafety.normalizedBody(message)).toString()
+            val loose = digest(identity)
+            val exact = digest(JSONArray().put(identity).put(timestamp).toString())
+            val saved = JSONArray(prefs.getString("receipts", "[]") ?: "[]")
+            val rows = ArrayList<Triple<String, String, Long>>()
+            for (i in 0 until saved.length()) {
+                val row = saved.getJSONObject(i)
+                val at = row.getLong("at")
+                // Keep future entries after a clock rollback: fail closed, don't replay.
+                if (now - at <= EXACT_TTL_MS) rows.add(Triple(row.getString("exact"), row.getString("loose"), at))
+            }
+            val legacyHeader = legacyChat.trim() + "|" + legacyAuthor.trim() + "|"
+            val legacyLoose = digest(legacyHeader + IncomingReplySafety.normalizedBody(message))
+            val legacyExact = digest(legacyHeader + timestamp.toString() + "|" + IncomingReplySafety.normalizedBody(message))
+            val duplicate = ReceiptPolicy.isDuplicate(rows, exact, loose, now) ||
+                ReceiptPolicy.isDuplicate(rows, legacyExact, legacyLoose, now)
+            val index = rows.indexOfFirst { it.first == exact }
+            if (index >= 0) rows[index] = Triple(exact, loose, now) else {
+                // Never evict a live receipt to make space for a possible duplicate.
+                if (rows.size >= MAX_RECEIPTS) return@synchronized false
+                rows.add(Triple(exact, loose, now))
+            }
+            val out = JSONArray()
+            rows.forEach { (e, l, at) -> out.put(JSONObject().put("exact", e).put("loose", l).put("at", at)) }
+            // Commit BEFORE admitting work. A killed process cannot lose an accepted receipt.
+            prefs.edit().putString("receipts", out.toString()).commit() && !duplicate
+        } catch (_: Exception) {
+            // Corruption or unavailable storage must not cause a second send.
+            false
+        }
     }
 }

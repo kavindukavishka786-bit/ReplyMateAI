@@ -9,11 +9,7 @@ import android.service.notification.NotificationListenerService
 object ListenerRecovery {
     private var lastAttempt = -30_000L
 
-    fun hasAccess(context: Context): Boolean = android.provider.Settings.Secure.getString(
-        context.contentResolver, "enabled_notification_listeners"
-    ).orEmpty().split(':').any {
-        ComponentName.unflattenFromString(it) == ComponentName(context, WhatsAppListener::class.java)
-    }
+    fun hasAccess(context: Context): Boolean = ReplyPermissions.listenerAllowed(context)
 
     @Synchronized
     fun requestIfNeeded(context: Context): Boolean {
