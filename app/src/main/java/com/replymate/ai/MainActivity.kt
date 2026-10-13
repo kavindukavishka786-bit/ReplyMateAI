@@ -160,7 +160,8 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                         }, onDismiss = { ReplyQueue.discard(it) })
                     Tab.SETTINGS -> SettingsScreen(settings, hasKey, secrets,
                         onHasKey = { hasKey = secrets.hasKey() },
-                        onPersonality = { scope.launch { repo.setPersonality(it) } })
+                        onPersonality = { scope.launch { repo.setPersonality(it) } },
+                        onOwnerContext = { scope.launch { repo.setOwnerContext(it) } })
                 }
                 Spacer(Modifier.height(12.dp))
             }
@@ -332,7 +333,8 @@ private fun ReviewScreen(reviews: List<PendingReply>, onApprove: (PendingReply, 
 
 @Composable
 private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore,
-                           onHasKey: () -> Unit, onPersonality: (String) -> Unit) {
+                           onHasKey: () -> Unit, onPersonality: (String) -> Unit,
+                           onOwnerContext: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var keyInput by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
@@ -367,10 +369,24 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
             modifier = Modifier.fillMaxWidth(), minLines = 4, maxLines = 8,
             label = { Text("AI instructions") }, shape = RoundedCornerShape(15.dp))
     }
-    Block("Try the AI", "Generate a local preview. This does not message anyone.") {
+    Block("Personal details", "Optional facts the AI can use when someone asks about you.") {
+        var about by remember(s.ownerContext) { mutableStateOf(s.ownerContext) }
+        OutlinedTextField(value = about, onValueChange = { about = it.take(700); onOwnerContext(about) },
+            modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 6,
+            label = { Text("Approved details about me") },
+            placeholder = { Text("Example: I'm a student. If someone asks when I'm free, ask them to send a proposed time. Never confirm plans for me.") },
+            shape = RoundedCornerShape(15.dp))
+        Text("Only enter non-sensitive information. These details are saved on your phone and sent with AI generation requests to Google.",
+            fontSize = 11.sp, color = Warm)
+    }
+    Block("Try a smart reply", "Type what another person might say. Gemini writes a response, not a copy.") {
         var input by remember { mutableStateOf("Hi, are you available today?") }
+        var demoSender by remember { mutableStateOf("Friend") }
         var result by remember { mutableStateOf("") }
         var busy by remember { mutableStateOf(false) }
+        OutlinedTextField(value = demoSender, onValueChange = { demoSender = it.take(60) },
+            modifier = Modifier.fillMaxWidth(), label = { Text("Contact name (preview)") },
+            shape = RoundedCornerShape(15.dp), singleLine = true)
         OutlinedTextField(value = input, onValueChange = { input = it.take(1000) },
             modifier = Modifier.fillMaxWidth(), label = { Text("Test incoming message") },
             shape = RoundedCornerShape(15.dp), maxLines = 4)
@@ -380,7 +396,7 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
             busy = true; result = ""
             scope.launch {
                 result = withContext(Dispatchers.IO) {
-                    runCatching { GeminiClient.draft(key, "Demo contact", input, s.personality) }
+                    runCatching { GeminiClient.draft(key, demoSender.ifBlank { "Friend" }, input, s.personality, s.ownerContext) }
                         .getOrElse { "Test failed: ${it.message ?: "Network/API problem"}" }
                 }
                 busy = false
@@ -392,7 +408,10 @@ private fun SettingsScreen(s: AppSettings, hasKey: Boolean, secrets: SecretStore
         }
         AnimatedVisibility(result.isNotBlank()) {
             Surface(color = PanelSoft, shape = RoundedCornerShape(14.dp)) {
-                Text(result, fontSize = 13.sp, modifier = Modifier.padding(15.dp))
+                Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Text("GEMINI REPLY", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Mint)
+                    Text(result, fontSize = 13.sp)
+                }
             }
         }
     }
