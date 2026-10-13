@@ -103,12 +103,16 @@ class WhatsAppListener : NotificationListenerService() {
             // Timestamp + content + contact distinguish repeated "Hi" messages while
             // filtering notification refreshes containing an already seen message.
             val fingerprint = "$chat\\u0000${person.name}\\u0000$time\\u0000$body"
-            synchronized(seen) {
+            val unseen = synchronized(seen) {
                 seen.entries.removeAll { now - it.value > SEEN_TTL_MS }
-                if (seen.containsKey(fingerprint)) continue
-                seen[fingerprint] = now
-                if (seen.size > 600) seen.clear()
+                if (seen.containsKey(fingerprint)) false
+                else {
+                    if (seen.size >= 600) seen.clear()
+                    seen[fingerprint] = now
+                    true
+                }
             }
+            if (!unseen) continue
             enqueue(chat, body, group, action)
         }
     }
