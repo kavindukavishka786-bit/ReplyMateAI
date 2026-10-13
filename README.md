@@ -21,6 +21,16 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## v1.5.0 — Duplicate reply and background reliability repair
+
+**Duplicate AI sends:** Android/WhatsApp can re-post the SAME incoming chat message with a different MessagingStyle timestamp. Prior builds used timestamp as part of the unique-message key, so repeated notifications could generate two or more replies. Version 1.5.0 adds a receipt guard that blocks exact repeat events for 15 minutes and coalesces matching sender + message text for 12 seconds even if the notification timestamp changes. Receipt fingerprints are salted SHA-256 hashes saved locally, not message text, contact names or credentials. The guard checks before Gemini API calls. There is a trade-off: a contact sending *identical text twice* inside 12 seconds may receive only one reply. Distinct messages remain eligible immediately.
+
+**Replies while the app is closed:** Choosing **Automatic** with the master switch enabled now starts the visible background foreground service while the Activity is open (provided notification access, notification permission and a Gemini API key are configured). The UI's **Keep running** button still works, and the persistent foreground notification should remain while you leave the ReplyMate screen or swipe away the app's task. The user-approved keep-alive preference is saved locally and can be recovered when the Activity is opened again; Android-managed listener disconnections request a rebind if permission remains granted. **Stop** remains respected: it will not restart against the user's explicit choice.
+
+**Phone setup:** Open ReplyMate → confirm master switch ON, choose Automatic, and confirm the ongoing `ReplyMate AI • Background mode` notification. Set the app's battery usage to Unrestricted, allow background activity and manufacturer-specific Auto-start if offered. For Infinix/XOS, check the phone's app startup / Power Marathon / battery manager controls. Whitelisting is user-controlled, not performed programmatically. **Do not force-stop the app** from Android app settings; force-stopped apps cannot automatically restart. Even a foreground service can be killed by the OS, aggressive power management, revoked notification access, lack of mobile data or WhatsApp changing its notification format. There is no promise of uninterrupted delivery or official WhatsApp support.
+
+**Test plan:** On a secondary WhatsApp account, send one message; verify exactly one AI reply. Send a different message right afterward; it should be eligible immediately. Next, leave the ReplyMate screen, lock the phone, and send a new message. Confirm the persistent status notification remains and one reply arrives. Do not test on a primary account until the behavior is stable.
+
 ## Main-thread network exception fixed (v1.4.3)
 
 **Symptom:** Settings → Try a smart reply succeeds, but live incoming WhatsApp messages show `Stage: Generate AI response. Unexpected NetworkOnMainThreadException` and neither drafts nor auto-replies are generated.
