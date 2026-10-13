@@ -3,7 +3,6 @@ package com.replymate.ai.logic
 import android.Manifest
 import android.content.pm.PackageManager
 import com.replymate.ai.data.SettingsRepository
-import com.replymate.ai.data.SecretStore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
 import android.app.Notification
@@ -181,7 +180,9 @@ class BackgroundKeepAliveService : Service() {
                             BackgroundStatus.stoppedByUser(this@BackgroundKeepAliveService),
                             cfg.enabled, ListenerRecovery.hasAccess(this@BackgroundKeepAliveService),
                             BackgroundStatus.notificationsAllowed(this@BackgroundKeepAliveService),
-                            SecretStore(applicationContext).hasKey())) {
+                            // Key readability is checked by boot recovery and each reply.
+                            // Binding health remains useful while the user replaces a key.
+                            hasKey = true)) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         stopSelf()
                         break

@@ -50,19 +50,19 @@ object ReplyQueue {
     suspend fun approve(context: Context, id: String, reply: String): Boolean = approvalMutex.withLock {
         val draft = claim(id) ?: return@withLock false
         try {
-        val age = System.currentTimeMillis() - draft.timestamp
-        val repo = SettingsRepository(context.applicationContext)
-        val current = repo.settings.first()
-        if (age !in 0L..5 * 60_000L || !WhatsAppListener.isConnected || !ListenerRecovery.hasAccess(context) ||
-            !SendSafety.permits(current, draft.sender, draft.group, draft.incoming, reply)) {
-            return@withLock false
-        }
-        val sent = ReplyTransport.send(context, draft.action, reply, draft.sender)
-        if (sent) {
-            ConversationMemory.record(draft.conversation, draft.incoming, reply)
-            repo.countSent()
-        }
-        sent
+            val age = System.currentTimeMillis() - draft.timestamp
+            val repo = SettingsRepository(context.applicationContext)
+            val current = repo.settings.first()
+            if (age !in 0L..5 * 60_000L || !WhatsAppListener.isConnected || !ListenerRecovery.hasAccess(context) ||
+                !SendSafety.permits(current, draft.sender, draft.group, draft.incoming, reply)) {
+                return@withLock false
+            }
+            val sent = ReplyTransport.send(context, draft.action, reply, draft.sender)
+            if (sent) {
+                ConversationMemory.record(draft.conversation, draft.incoming, reply)
+                repo.countSent()
+            }
+            sent
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (problem: Exception) {
             runCatching { SettingsRepository(context.applicationContext)
