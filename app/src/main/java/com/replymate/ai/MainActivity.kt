@@ -127,6 +127,19 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
     }
     val notificationLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh() }
 
+    // Start/recover the foreground service while this Activity is visible for
+    // users who explicitly selected Automatic mode. Respect Stop Background:
+    // it must never silently restart if the user stopped it themselves.
+    LaunchedEffect(settings.enabled, settings.mode, listenerGranted, notificationGranted, hasKey) {
+        if (settings.enabled && settings.mode == ReplyMode.AUTOMATIC &&
+            listenerGranted && notificationGranted && hasKey &&
+            !BackgroundStatus.running.value &&
+            !BackgroundStatus.stoppedByUser(ctx)) {
+            backgroundError = if (BackgroundStatus.start(ctx)) "" else
+                "Background service could not start. Check Android permissions and battery restrictions."
+        }
+    }
+
     MaterialTheme(colorScheme = darkColorScheme(
         primary = Mint, secondary = Blue, background = Ink, surface = Panel,
         onPrimary = Ink, onSurface = Color.White, onBackground = Color.White
