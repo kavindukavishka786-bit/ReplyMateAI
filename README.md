@@ -21,6 +21,16 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Main-thread network exception fixed (v1.4.3)
+
+**Symptom:** Settings → Try a smart reply succeeds, but live incoming WhatsApp messages show `Stage: Generate AI response. Unexpected NetworkOnMainThreadException` and neither drafts nor auto-replies are generated.
+
+**Cause:** The per-contact notification queue used `scope.launch(start = CoroutineStart.UNDISPATCHED)` to keep message order. `UNDISPATCHED` starts on the notification callback's Android main thread **even when the CoroutineScope uses `Dispatchers.IO`**. If cached settings and the message queue do not suspend before `GeminiClient.draft`, its synchronous `HttpURLConnection` executes on main, which Android forbids.
+
+**Fix:** v1.4.3 retains ordered per-contact processing, but forces `withContext(Dispatchers.IO)` **inside the acquired contact mutex and before any work that could reach Gemini**. The main-thread callback is free immediately, and Gemini HTTP requests execute on an I/O worker. A JVM regression test checks the dispatcher handoff behavior.
+
+**Testing:** Install v1.4.3 and enable notification access and one approved test contact. Set **Manual** mode first. Have the contact send a WhatsApp notification while the app is closed; confirm a draft appears with **no new NetworkOnMainThreadException**. Then try Automatic only if approved. The old error remains visible until a later failure or settings reset and the historic Errors today count is not cleared automatically. This only addresses that specific exception; WhatsApp notifications may still be unavailable or supply expired reply actions. The app is not an official WhatsApp automation solution.
+
 ## Diagnosing unexpected failures (v1.4.2)
 
 If Home showed only `Unexpected reply processing error` in v1.4.1, that label hid the actual exception. This update records **processing stage** and a **safe exception category**, so a new failure can be investigated without uploading personal WhatsApp conversations.
