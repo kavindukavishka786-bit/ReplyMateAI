@@ -107,6 +107,12 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
         notificationGranted = Build.VERSION.SDK_INT < 33 ||
             ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
         hasKey = secrets.hasKey()
+        // User previously enabled the visible keep-alive; if the OS killed
+        // that service, recover only while this Activity is visible.
+        if (BackgroundStatus.requested(ctx) && !BackgroundStatus.running.value &&
+            settings.enabled && listenerGranted && notificationGranted && hasKey) {
+            BackgroundStatus.start(ctx)
+        }
         if (listenerGranted && !WhatsAppListener.isConnected) {
             runCatching {
                 NotificationListenerService.requestRebind(ComponentName(ctx, WhatsAppListener::class.java))
@@ -155,6 +161,13 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
                         onEnable = { checked ->
                             if (!checked) BackgroundStatus.stop(ctx)
                             scope.launch { repo.setEnabled(checked) }
+                            // Explicitly enabling Automatic while the app is visible
+                            // starts the foreground service. No second button required.
+                            if (checked && settings.mode == ReplyMode.AUTOMATIC &&
+                                listenerGranted && notificationGranted && hasKey) {
+                                backgroundError = if (BackgroundStatus.start(ctx)) "" else
+                                    "Android blocked background mode. Check permissions and battery settings."
+                            }
                         },
                         onStartBackground = {
                             backgroundError = if (BackgroundStatus.start(ctx)) "" else
@@ -201,6 +214,10 @@ private fun ReplyMateApp(reviewOpenSequence: Int) {
             text = { Text("ReplyMate may send messages without review. Only use this with consent and trusted contacts. WhatsApp can restrict unofficial automation. Daily limits and cooldowns apply.") },
             confirmButton = { TextButton(onClick = {
                 scope.launch { repo.setMode(ReplyMode.AUTOMATIC) }
+                if (settings.enabled && listenerGranted && notificationGranted && hasKey) {
+                    backgroundError = if (BackgroundStatus.start(ctx)) "" else
+                        "Android blocked background mode. Check permissions and battery settings."
+                }
                 askAuto = false
             }) { Text("I understand") } },
             dismissButton = { TextButton(onClick = { askAuto = false }) { Text("Stay manual") } }
@@ -312,9 +329,9 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
             Text("Battery optimization settings")
         }
         if (backgroundError.isNotBlank()) Text(backgroundError, color = Warm, fontSize = 12.sp)
-        Text("Start this once while ReplyMate is open. Android shows a persistent status notification. It doesn't force WhatsApp to deliver messages or bypass a device's battery restrictions.",
+        Text("Automatic mode starts this foreground service for you while the app is open. Confirm a persistent ReplyMate notification appears before leaving the app. Android battery restrictions can still stop it.",
              fontSize = 11.sp, color = Muted)
-        Text("For automatic replies, also choose Automatic in Reply mode below. After restarting your phone, reopen ReplyMate to resume background keep-alive.",
+        Text("After a reboot or force-stop, reopen ReplyMate and enable background mode. Closing the screen should leave the service running, but some XOS/Infinix power managers may kill it. Allow Auto-start and Unrestricted battery use.",
              fontSize = 11.sp, color = Warm)
     }
     Block("Reply mode", "Choose how you want AI messages handled.") {
