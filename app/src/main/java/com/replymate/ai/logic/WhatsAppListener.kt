@@ -44,7 +44,6 @@ class WhatsAppListener : NotificationListenerService() {
         val isConnected: Boolean get() = _connected.value
         private const val MAX_PENDING_PER_CONTACT = 12
         private const val FRESH_MESSAGE_WINDOW_MS = 180_000L
-        private const val SEEN_TTL_MS = 10 * 60_000L
     }
 
     override fun onListenerConnected() {
@@ -62,7 +61,7 @@ class WhatsAppListener : NotificationListenerService() {
     private val senderLocks = ConcurrentHashMap<String, Mutex>()
     private val waitingCounts = ConcurrentHashMap<String, AtomicInteger>()
     private val lastActions = ConcurrentHashMap<String, Notification.Action>()
-    private val seen = mutableMapOf<String, Long>()
+    private val receipts by lazy { IncomingReceiptGuard(applicationContext) }
     private val lastSent = ConcurrentHashMap<String, Long>()
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
@@ -101,19 +100,10 @@ class WhatsAppListener : NotificationListenerService() {
                 body.matches(Regex("(?i)^\\d+ (new )?messages?$")) ||
                 ReplyLoopGuard.shouldIgnore(chat, body)) continue
 
-            // Timestamp + content + contact distinguish repeated "Hi" messages while
-            // filtering notification refreshes containing an already seen message.
-            val fingerprint = "$chat\\u0000${person.name}\\u0000$time\\u0000$body"
-            val unseen = synchronized(seen) {
-                seen.entries.removeAll { now - it.value > SEEN_TTL_MS }
-                if (seen.containsKey(fingerprint)) false
-                else {
-                    if (seen.size >= 600) seen.clear()
-                    seen[fingerprint] = now
-                    true
-                }
-            }
-            if (!unseen) continue
+            // Android may re-post the SAME WhatsApp message with a different
+            // MessagingStyle timestamp. Guard both exact receipts and very recent
+            // same-body notification refreshes, persisting salted digests across restarts.
+            if (!receipts.accept(chat, person.name?.toString().orEmpty(), time, body, now)) continue
             enqueue(chat, body, group, action)
         }
     }
