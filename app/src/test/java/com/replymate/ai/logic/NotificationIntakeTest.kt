@@ -3,7 +3,7 @@ package com.replymate.ai.logic
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.UserHandle
+import android.os.Process
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
@@ -41,7 +41,7 @@ class NotificationIntakeTest {
                 .setSmallIcon(android.R.drawable.ic_dialog_email).setContentTitle("Alice")
                 .setShortcutId("alice-chat").setStyle(style).addAction(reply).build()
             return StatusBarNotification("com.whatsapp", "com.whatsapp", 1, null, 0, 0,
-                notification, UserHandle.of(0), now)
+                notification, Process.myUserHandle(), now)
         }
         try {
             repeat(30) { service.get().onNotificationPosted(notification("Hello")) }

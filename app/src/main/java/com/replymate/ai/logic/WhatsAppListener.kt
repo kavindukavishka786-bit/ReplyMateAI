@@ -142,15 +142,15 @@ class WhatsAppListener : NotificationListenerService() {
         // must not occupy the bounded generation queue and crowd out a NEW message.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-            intake.withLock {
-                val admitted = withContext(Dispatchers.Default) {
-                    withContext(Dispatchers.IO) {
-                        ReplyFreshness.isFresh(timestamp) && receipts.accept(conversation, author,
-                            timestamp, body, legacyChat = chat, legacyAuthor = authorName)
+                intake.withLock {
+                    val admitted = withContext(Dispatchers.Default) {
+                        withContext(Dispatchers.IO) {
+                            ReplyFreshness.isFresh(timestamp) && receipts.accept(conversation, author,
+                                timestamp, body, legacyChat = chat, legacyAuthor = authorName)
+                        }
                     }
+                    if (admitted) enqueue(conversation, chat, timestamp, body, group, action)
                 }
-                if (admitted) enqueue(conversation, chat, timestamp, body, group, action)
-            }
             } finally { intakeCount.decrementAndGet() }
         }
     }
