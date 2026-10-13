@@ -7,7 +7,9 @@ import java.net.URL
 
 object GeminiClient {
     const val MODEL = "gemini-3.5-flash-lite"
-    private const val ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent"
+    const val ALTERNATIVE = "gemini-3.1-flash-lite"
+    val SUPPORTED_MODELS = setOf(MODEL, ALTERNATIVE)
+    private const val BASE_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/"
 
     /**
      * Writes a reply to the sender, not a copy of their text.
@@ -20,9 +22,12 @@ object GeminiClient {
         incoming: String,
         personality: String,
         ownerContext: String = "",
-        history: List<ChatTurn> = emptyList()
+        history: List<ChatTurn> = emptyList(),
+        modelId: String = MODEL
     ): String {
         require(incoming.isNotBlank()) { "There is no incoming message to answer." }
+        val requestedModel = modelId.takeIf { it in SUPPORTED_MODELS } ?: MODEL
+        val endpoint = BASE_ENDPOINT + requestedModel + ":generateContent"
         val cleanSender = sender.take(120)
         val firstContact = history.isEmpty()
         val system = """
@@ -59,7 +64,7 @@ object GeminiClient {
                     .put("maxOutputTokens", 450)
                     .put("thinkingConfig", JSONObject().put("thinkingLevel", "minimal")))
 
-            val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection)
+            val conn = (URL(endpoint).openConnection() as HttpURLConnection)
             try {
                 conn.requestMethod = "POST"
                 conn.connectTimeout = 15000
