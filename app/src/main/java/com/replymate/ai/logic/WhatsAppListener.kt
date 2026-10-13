@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.os.PowerManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -27,6 +28,21 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 
 class WhatsAppListener : NotificationListenerService() {
+    companion object {
+        @Volatile var isConnected: Boolean = false
+            private set
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        isConnected = true
+    }
+
+    override fun onListenerDisconnected() {
+        isConnected = false
+        super.onListenerDisconnected()
+    }
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val sendMutex = Mutex()
     private val processing = Collections.synchronizedSet(mutableSetOf<String>())
@@ -77,6 +93,14 @@ class WhatsAppListener : NotificationListenerService() {
             if (seen.size > 200) seen.entries.removeAll { now - it.value > 90_000L }
         }
         if (!processing.add(sender)) return
+        // Keep CPU awake only while actively producing a reply, not all day.
+        // Gemini can be slow when the display is off. The timed lock is released
+        // in finally, and also expires automatically if Android kills our process.
+        val wakeLock = runCatching {
+            (getSystemService(POWER_SERVICE) as PowerManager)
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReplyMateAI:GenerateReply")
+                .apply { setReferenceCounted(false); acquire(120_000L) }
+        }.getOrNull()
         scope.launch {
             val repository = SettingsRepository(applicationContext)
             try {
@@ -121,7 +145,10 @@ class WhatsAppListener : NotificationListenerService() {
             } catch (_: Exception) {
                 // Fail closed: API and network errors never trigger automatic fallback messages.
                 repository.countSkipped()
-            } finally { processing.remove(sender) }
+            } finally {
+                processing.remove(sender)
+                runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
+            }
         }
     }
 
@@ -149,6 +176,7 @@ class WhatsAppListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        isConnected = false
         scope.cancel()
         super.onDestroy()
     }
