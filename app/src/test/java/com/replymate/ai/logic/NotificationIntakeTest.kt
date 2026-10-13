@@ -40,7 +40,7 @@ class NotificationIntakeTest {
             val notification = NotificationCompat.Builder(context, "whatsapp")
                 .setSmallIcon(android.R.drawable.ic_dialog_email).setContentTitle("Alice")
                 .setShortcutId("alice-chat").setStyle(style).addAction(reply).build()
-            return StatusBarNotification("com.whatsapp", "com.whatsapp", 1, null, 0, 0,
+            return StatusBarNotification("com.whatsapp", "com.whatsapp", 1, null, 0, 0, 0,
                 notification, Process.myUserHandle(), now)
         }
         try {
