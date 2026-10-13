@@ -26,6 +26,7 @@ data class AppSettings(
     val includeGroups: Boolean = false,
     val personality: String = "Friendly, warm and relaxed. Understand each incoming message and respond naturally. Never copy the sender or invent personal facts.",
     val ownerContext: String = "",
+    val modelId: String = "gemini-3.5-flash-lite",
     val dailyLimit: Int = 20,
     val cooldownMinutes: Int = 15,
     val instantReplies: Boolean = true,
@@ -47,6 +48,7 @@ class SettingsRepository(private val context: Context) {
         val groups = booleanPreferencesKey("groups")
         val personality = stringPreferencesKey("personality")
         val ownerContext = stringPreferencesKey("owner_context")
+        val model = stringPreferencesKey("selected_model")
         val dailyLimit = intPreferencesKey("daily_limit")
         val cooldown = intPreferencesKey("cooldown")
         val instant = booleanPreferencesKey("instant_replies")
@@ -69,6 +71,7 @@ class SettingsRepository(private val context: Context) {
             includeGroups = p[Keys.groups] ?: false,
             personality = p[Keys.personality] ?: AppSettings().personality,
             ownerContext = p[Keys.ownerContext] ?: "",
+            modelId = p[Keys.model]?.takeIf { it == "gemini-3.5-flash-lite" || it == "gemini-3.1-flash-lite" } ?: "gemini-3.5-flash-lite",
             dailyLimit = p[Keys.dailyLimit] ?: 20,
             cooldownMinutes = p[Keys.cooldown] ?: 15,
             instantReplies = p[Keys.instant] ?: true,
@@ -89,6 +92,9 @@ class SettingsRepository(private val context: Context) {
     suspend fun setGroups(value: Boolean) = edit(Keys.groups, value)
     suspend fun setPersonality(value: String) = edit(Keys.personality, value)
     suspend fun setOwnerContext(value: String) = edit(Keys.ownerContext, value.take(700))
+    suspend fun setModel(value: String) {
+        if (value == "gemini-3.5-flash-lite" || value == "gemini-3.1-flash-lite") edit(Keys.model, value)
+    }
     suspend fun setDailyLimit(value: Int) = edit(Keys.dailyLimit, value.coerceIn(1, 50))
     suspend fun setCooldown(value: Int) = edit(Keys.cooldown, value.coerceIn(1, 120))
     suspend fun setInstantReplies(value: Boolean) = edit(Keys.instant, value)
