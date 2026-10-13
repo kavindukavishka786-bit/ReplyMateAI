@@ -21,6 +21,17 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Error diagnostics (v1.4.1)
+
+Previous builds showed only an **Errors today** counter; failures in Gemini generation were silently swallowed. Starting v1.4.1, the dashboard has a **Latest error** section beneath the counters, showing a sanitized explanation and local time. It can distinguish:
+- HTTP 400 (invalid request), HTTP 401/403 (API key/access), HTTP 404 (model access), HTTP 429 (quota), and HTTP 5xx (temporary server issue).
+- Network connection failures and Gemini response timeouts.
+- Empty/model-echo output and failed WhatsApp notification reply actions.
+
+No incoming message, sender name, API key, request contents, or raw error stack trace is written to these diagnostics. The local error count is still daily; a prior day's last error is shown with its timestamp.
+
+**How to diagnose:** Install v1.4.1, open **Settings → Try a smart reply**, and test `Hi, how are you?`. If it fails, read the exact safe error. Return to Home to see the last error from live WhatsApp processing after the next attempted reply. If the result says **HTTP 404**, you can switch between **Settings → AI model → 3.5 Flash-Lite / 3.1 Flash-Lite** based on which model your Google AI Studio key can access. If it says **HTTP 429**, wait or check quotas—trying to bypass rate limits is not an option. For **HTTP 401/403**, check your API key, model access and project restrictions in Google AI Studio without publishing the key. Google API errors, permissions and quotas depend on your project. There is no promise that switching models will fix restrictions.
+
 ## Instant per-message replies (v1.4.0)
 
 The previous automatic mode could skip fast follow-up messages because of a default 15-minute cooldown, a 20-second post-send suppression window, and a one-in-flight-message-per-contact gate.
