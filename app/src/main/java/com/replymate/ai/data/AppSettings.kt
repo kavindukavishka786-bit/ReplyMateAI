@@ -10,6 +10,8 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 private val Context.replyMateStore by preferencesDataStore(name = "replymate_settings")
 
@@ -30,6 +32,8 @@ data class AppSettings(
     val generated: Int = 0,
     val sent: Int = 0,
     val skipped: Int = 0,
+    val lastFailure: String = "",
+    val lastFailureTime: String = "",
     val date: String = LocalDate.now().toString()
 )
 
@@ -49,6 +53,8 @@ class SettingsRepository(private val context: Context) {
         val generated = intPreferencesKey("generated")
         val sent = intPreferencesKey("sent")
         val skipped = intPreferencesKey("skipped")
+        val lastFailure = stringPreferencesKey("last_failure")
+        val lastFailureTime = stringPreferencesKey("last_failure_time")
         val date = stringPreferencesKey("date")
     }
 
@@ -69,6 +75,8 @@ class SettingsRepository(private val context: Context) {
             generated = if (p[Keys.date] == today) p[Keys.generated] ?: 0 else 0,
             sent = if (p[Keys.date] == today) p[Keys.sent] ?: 0 else 0,
             skipped = if (p[Keys.date] == today) p[Keys.skipped] ?: 0 else 0,
+            lastFailure = p[Keys.lastFailure] ?: "",
+            lastFailureTime = p[Keys.lastFailureTime] ?: "",
             date = today
         )
     }
@@ -92,6 +100,29 @@ class SettingsRepository(private val context: Context) {
     suspend fun countGenerated() = increase(Keys.generated)
     suspend fun countSent() = increase(Keys.sent)
     suspend fun countSkipped() = increase(Keys.skipped)
+
+    /** Store only the sanitized category, NEVER the raw exception or message contents. */
+    suspend fun recordFailure(description: String) {
+        context.replyMateStore.edit { p ->
+            val today = LocalDate.now().toString()
+            if (p[Keys.date] != today) {
+                p[Keys.date] = today
+                p[Keys.generated] = 0
+                p[Keys.sent] = 0
+                p[Keys.skipped] = 0
+            }
+            p[Keys.skipped] = (p[Keys.skipped] ?: 0) + 1
+            p[Keys.lastFailure] = description.take(240)
+            p[Keys.lastFailureTime] = LocalDateTime.now().format(DateTimeFormatter.ofPattern("MMM d, HH:mm"))
+        }
+    }
+
+    suspend fun clearFailure() {
+        context.replyMateStore.edit { p ->
+            p.remove(Keys.lastFailure)
+            p.remove(Keys.lastFailureTime)
+        }
+    }
 
     private suspend fun increase(key: Preferences.Key<Int>) {
         context.replyMateStore.edit { p ->
