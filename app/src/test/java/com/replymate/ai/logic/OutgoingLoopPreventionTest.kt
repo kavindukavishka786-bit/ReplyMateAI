@@ -22,8 +22,11 @@ class OutgoingLoopPreventionTest {
             "Hey! I'm an AI assistant. What's up?", t + 200L))
         assertTrue(ReplyLoopGuard.shouldIgnore("FeedbackTestFriend",
             "You: Hey! I'm an AI assistant. What's up?", t + 23000L))
-        assertTrue(ReplyLoopGuard.shouldIgnore("FeedbackTestFriend",
+        // Fresh incoming text is never blocked by the former 20-second blanket window.
+        assertFalse(ReplyLoopGuard.shouldIgnore("FeedbackTestFriend",
             "Another notification update", t + 10000L))
+        assertFalse(ReplyLoopGuard.shouldIgnore("FeedbackTestFriend",
+            "New genuine incoming message one second later", t + 1000L))
         assertFalse(ReplyLoopGuard.shouldIgnore("FeedbackTestFriend",
             "New message after cooldown", t + 25000L))
         assertFalse(ReplyLoopGuard.shouldIgnore("FeedbackTestDifferentFriend",
