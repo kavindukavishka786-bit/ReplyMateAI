@@ -68,10 +68,16 @@ class ManualReplySafetyTest {
     }
 
     @Test fun revokedPermissionAndGroupOptOutPreventManualSend() = runBlocking {
-        val id = ReplyQueue.add("Alice", "Hi", "Hey!", action(), group = true)
-        assertFalse(ReplyQueue.approve(context, id, "Hey!"))
-        val next = ReplyQueue.add("Alice", "Hi", "Hey!", action())
-        Settings.Secure.putString(context.contentResolver, "enabled_notification_listeners", "")
-        assertFalse(ReplyQueue.approve(context, next, "Hey!"))
+        val listener = Robolectric.buildService(WhatsAppListener::class.java).create()
+        try {
+            listener.get().onListenerConnected()
+            assertTrue(WhatsAppListener.isConnected)
+            val id = ReplyQueue.add("Alice", "Hi", "Hey!", action(), group = true)
+            assertFalse(ReplyQueue.approve(context, id, "Hey!"))
+            val next = ReplyQueue.add("Alice", "Hi", "Hey!", action())
+            Settings.Secure.putString(context.contentResolver, "enabled_notification_listeners", "")
+            assertTrue(WhatsAppListener.isConnected)
+            assertFalse(ReplyQueue.approve(context, next, "Hey!"))
+        } finally { listener.destroy() }
     }
 }
