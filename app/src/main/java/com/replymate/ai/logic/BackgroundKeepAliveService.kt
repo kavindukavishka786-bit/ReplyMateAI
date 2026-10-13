@@ -31,15 +31,33 @@ object BackgroundStatus {
     val running = _running.asStateFlow()
     internal fun setRunning(value: Boolean) { _running.value = value }
 
+    private const val PREFS = "replymate_background_settings"
+    private const val PREFERRED = "requested_by_user"
+
+    fun requested(context: Context): Boolean = context.applicationContext
+        .getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREFERRED, false)
+
+    internal fun rememberRequested(context: Context, enabled: Boolean) {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(PREFERRED, enabled).apply()
+    }
+
     fun start(context: Context): Boolean = runCatching {
         ContextCompat.startForegroundService(
             context.applicationContext,
             Intent(context.applicationContext, BackgroundKeepAliveService::class.java)
         )
+        // Start only from a visible screen / explicit user action. Save the user's
+        // choice for service recovery on returning to the Activity, not at boot.
+        rememberRequested(context, true)
         true
-    }.getOrDefault(false)
+    }.getOrElse {
+        rememberRequested(context, false)
+        false
+    }
 
     fun stop(context: Context) {
+        rememberRequested(context, false)
         context.applicationContext.stopService(
             Intent(context.applicationContext, BackgroundKeepAliveService::class.java)
         )
@@ -58,6 +76,7 @@ class BackgroundKeepAliveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
+            BackgroundStatus.rememberRequested(this, false)
             BackgroundStatus.setRunning(false)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -98,6 +117,10 @@ class BackgroundKeepAliveService : Service() {
         }
         BackgroundStatus.setRunning(true)
 
+        // Foreground service continues independently of MainActivity. Swiping
+        // the Activity away doesn't explicitly stop it (stopWithTask=false).
+        // An Android force-stop or aggressive OEM task killer can still stop it.
+        // The notification-listener permission is managed by Android.
         // The system binds notification listeners independently of this foreground service.
         // Request recovery only when it isn't already connected.
         if (!WhatsAppListener.isConnected &&
