@@ -327,6 +327,29 @@ private fun HomeScreen(s: AppSettings, access: Boolean, notif: Boolean, key: Boo
         Stat("${s.sent}", "Sent today", Blue, Modifier.weight(1f))
         Stat("${s.skipped}", "Errors today", Warm, Modifier.weight(1f))
     }
+    if (s.lastFailure.isNotBlank()) {
+        Block("Latest error", "Detected ${s.lastFailureTime} · No messages or API keys are recorded") {
+            Row(verticalAlignment = Alignment.Top) {
+                Icon(Icons.Filled.ErrorOutline, null, tint = Warm, modifier = Modifier.size(21.dp))
+                Spacer(Modifier.width(10.dp))
+                Text(s.lastFailure, fontSize = 13.sp, lineHeight = 20.sp,
+                    color = Color(0xFFFFD19B), modifier = Modifier.weight(1f))
+            }
+            OutlinedButton(onClick = onConfigureKey, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.Science, null)
+                Spacer(Modifier.width(8.dp))
+                Text("Open Settings → Test Gemini")
+            }
+        }
+    } else if (s.skipped > 0) {
+        Block("Errors detected", "Previous errors were counted without details.") {
+            Text("Update installed. Send one new test message to capture the specific cause, or open Settings → Try a smart reply.",
+                color = Warm, fontSize = 13.sp)
+            OutlinedButton(onClick = onConfigureKey, modifier = Modifier.fillMaxWidth()) {
+                Text("Test Gemini now")
+            }
+        }
+    }
     if (reviews > 0) ElevatedButton(onClick = onSeeReviews, modifier = Modifier.fillMaxWidth(),
         colors = ButtonDefaults.elevatedButtonColors(containerColor = Mint, contentColor = Ink)) {
         Icon(Icons.Filled.Markunread, null); Spacer(Modifier.width(9.dp))
