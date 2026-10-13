@@ -158,7 +158,7 @@ class WhatsAppListener : NotificationListenerService() {
         try {
             val draft = GeminiClient.draft(
                 apiKey, chat, body, cfg.personality, cfg.ownerContext,
-                ConversationMemory.recent(chat)
+                ConversationMemory.recent(chat), cfg.modelId
             )
             repo.countGenerated()
             val latest = repo.settings.first()
