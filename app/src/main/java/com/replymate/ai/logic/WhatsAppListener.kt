@@ -71,7 +71,10 @@ class WhatsAppListener : NotificationListenerService() {
                 if (age < cfg.cooldownMinutes * 60_000L && cfg.mode == ReplyMode.AUTOMATIC) return@launch
                 if (cfg.mode == ReplyMode.AUTOMATIC && cfg.sent >= cfg.dailyLimit) return@launch
 
-                val draft = GeminiClient.draft(apiKey, sender, incoming, cfg.personality)
+                val draft = GeminiClient.draft(
+                    apiKey, sender, incoming, cfg.personality, cfg.ownerContext,
+                    ConversationMemory.recent(sender)
+                )
                 repository.countGenerated()
                 // Recheck master toggle/mode after network call to prevent sends during shutdown.
                 val latest = repository.settings.first()
@@ -84,6 +87,7 @@ class WhatsAppListener : NotificationListenerService() {
                             ContactRules.isPermitted(sender, current.allowed, current.blocked, current.allowAll) &&
                             (System.currentTimeMillis() - (lastSent[sender] ?: 0L)) >= current.cooldownMinutes * 60_000L) {
                             if (ReplyTransport.send(applicationContext, action, draft)) {
+                                ConversationMemory.record(sender, incoming, draft)
                                 lastSent[sender] = System.currentTimeMillis()
                                 repository.countSent()
                             }
