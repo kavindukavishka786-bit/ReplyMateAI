@@ -21,6 +21,16 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Diagnosing unexpected failures (v1.4.2)
+
+If Home showed only `Unexpected reply processing error` in v1.4.1, that label hid the actual exception. This update records **processing stage** and a **safe exception category**, so a new failure can be investigated without uploading personal WhatsApp conversations.
+
+On Home, check **Latest error** after one new message from your approved test contact. A message such as `Stage: Generate AI response. Network connection was interrupted...` points to transport, whereas `Stage: Save counters. Unexpected IllegalStateException...` points to local app state. **The old v1.4.1 error cannot be interpreted retroactively**; a new attempt is necessary.
+
+Check **Settings → Try a smart reply** with a simple test sentence. The test now sanitizes exception messages as well. If the in-app Gemini test works but background messaging fails, examine the **Latest error** and Notification access / direct-reply support. If the test itself fails, investigate the API key, model access, mobile data and Google AI Studio quota. To protect privacy, do not share API keys, full logcat output, or sensitive message text.
+
+The update does not prove all platform-specific causes are fixed. Only the actual failure from the device can establish the next targeted repair. The best test is one trusted contact, Manual mode first, and a lock-screen incoming WhatsApp message.
+
 ## Error diagnostics (v1.4.1)
 
 Previous builds showed only an **Errors today** counter; failures in Gemini generation were silently swallowed. Starting v1.4.1, the dashboard has a **Latest error** section beneath the counters, showing a sanitized explanation and local time. It can distinguish:
