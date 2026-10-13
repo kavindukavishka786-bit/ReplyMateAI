@@ -134,8 +134,14 @@ class WhatsAppListener : NotificationListenerService() {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 lock.withLock {
-                    withContext(Dispatchers.IO) {
-                        process(chat, body, group, action)
+                    // The coroutine's context already says IO, but UNDISPATCHED
+                    // starts on the callback thread. withContext(IO) alone can
+                    // execute inline because its dispatcher equals this context.
+                    // Force a *different* dispatcher first, then switch to IO.
+                    withContext(Dispatchers.Default) {
+                        withContext(Dispatchers.IO) {
+                            process(chat, body, group, action)
+                        }
                     }
                 }
             } finally {
