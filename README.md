@@ -21,6 +21,24 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Background operation (v1.3.0)
+
+**Why the app seemed to reply only when opened:** Android can stop background processes, especially on phones with aggressive battery management. A system-bound `NotificationListenerService` receives WhatsApp notifications independently of the Activity, but it can still be disconnected or killed by the OS. And **Manual** mode intentionally waits for the user to approve a draft, even when notification detection happens in the background.
+
+To opt in to continuous background operation:
+1. Open ReplyMate after updating, save/verify your API key, and grant **Notification access** and **Allow notifications**.
+2. Switch **Enable ReplyMate** ON and ensure your approved contacts are correct.
+3. In **Background operation**, tap **Keep running**. An ongoing "ReplyMate AI • Background mode" notification appears with a **Stop background** button. You can leave the app screen after starting it.
+4. Use **Battery optimization settings** to set ReplyMate to unrestricted / not optimized (wording depends on Android). Some devices also require Auto-start/Background activity permission from the manufacturer's battery settings.
+5. If you want replies **sent** while the app is closed, choose **Automatic** in Reply mode and confirm the safety warning. In **Manual** mode, messages become review drafts but are not sent until you approve them.
+6. Have one trusted contact send a new WhatsApp message while ReplyMate is in the background and the screen is off. Test with **Manual** first to ensure the new draft appears; then test Automatic if you accept the account risks.
+
+**Limitations:** "Keep running" is an explicitly started Android *specialUse foreground service*, not a bypass of system controls or WhatsApp terms. It requires a visible ongoing notification on supported Android versions, uses extra battery, does not read missed historical messages or guarantee uninterrupted delivery, and may stop if Android or the device manufacturer restricts it. Your phone must have an internet connection and WhatsApp notifications must show a compatible incoming sender + direct reply action. After a reboot, reopen ReplyMate and re-enable Keep running if necessary; the app never starts a foreground service silently at boot. If you force-stop ReplyMate, Android disables its background work until you reopen it. Google Play publication of the specialUse foreground-service type requires additional eligibility review.
+
+## Existing safety protections
+
+All earlier inbound-only sender checks, 20-second feedback guard, 10-minute echoed-own-text guard, allowlist, daily send cap and cooldown remain active. These checks intentionally skip uncertain notifications.
+
 ## Important outgoing-message loop fix (v1.2.0)
 
 ReplyMate previously could mistake its **own sent message** for an incoming WhatsApp notification, then respond again. Version 1.2.0 prevents that feedback loop in two ways:
@@ -99,7 +117,7 @@ The project intentionally uses the `gradle/actions/setup-gradle` GitHub Action t
 - **App replies to its own outgoing messages:** Upgrade to **v1.2.0**, turn off the app before updating, then test on a second number with manual review enabled. Version 1.2.0 drops ambiguous notification types and suppresses feedback from outgoing direct replies.
 - **Replies mirror the incoming text:** Install v1.1.0 or newer, test in **Settings → Try a smart reply**, verify your Gemini key is working and review the generated result. The new echo guard prevents unchanged copies from being auto-sent.
 - **Upgrading the debug APK:** GitHub-hosted builds can use different debug signing certificates. If Android reports a conflicting package or refuses to update, back up your configuration manually, uninstall the old version and install the new APK. You will need to grant permissions and enter your API key again.
-- **Missed messages:** Some phone manufacturers stop apps or delay notifications. The listener is not a guaranteed background queue.
+- **Missed messages:** Some phone manufacturers stop apps or delay notifications. The listener is not a guaranteed background queue. Check the **Background operation** controls, battery restrictions, and listener status. Opening the app cannot recover messages that never arrived as notifications.
 - **Build fails:** Review the log in GitHub Actions. Dependencies are retrieved on the runner; a temporary Google Maven or SDK outage may cause a build failure. The ZIP was produced without an Android SDK and has not been compiled on a device.
 
 ## File structure
