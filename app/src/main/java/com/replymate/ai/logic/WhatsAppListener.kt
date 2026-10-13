@@ -137,30 +137,38 @@ class WhatsAppListener : NotificationListenerService() {
 
     private suspend fun process(chat: String, body: String, group: Boolean, action: Notification.Action) {
         val repo = SettingsRepository(applicationContext)
-        val cfg = repo.settings.first()
-        if (!cfg.enabled || (group && !cfg.includeGroups) ||
-            !ContactRules.isPermitted(chat, cfg.allowed, cfg.blocked, cfg.allowAll) ||
-            ReplyLoopGuard.shouldIgnore(chat, body)) return
-
-        val apiKey = SecretStore(applicationContext).read() ?: return
-        if (cfg.mode == ReplyMode.AUTOMATIC) {
-            if (cfg.sent >= cfg.dailyLimit) return
-            if (!cfg.instantReplies &&
-                System.currentTimeMillis() - (lastSent[chat] ?: 0L) < cfg.cooldownMinutes * 60_000L) return
-        }
-
-        // Only hold a partial wake lock while a reply is actually generated/sent.
-        val wakeLock = runCatching {
-            (getSystemService(POWER_SERVICE) as PowerManager)
-                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReplyMateAI:GenerateReply")
-                .apply { setReferenceCounted(false); acquire(120_000L) }
-        }.getOrNull()
+        var stage = ReplyStage.LOAD_SETTINGS
+        var wakeLock: PowerManager.WakeLock? = null
         try {
+            val cfg = repo.settings.first()
+            stage = ReplyStage.CHECK_PERMISSIONS
+            if (!cfg.enabled || (group && !cfg.includeGroups) ||
+                !ContactRules.isPermitted(chat, cfg.allowed, cfg.blocked, cfg.allowAll) ||
+                ReplyLoopGuard.shouldIgnore(chat, body)) return
+
+            val apiKey = SecretStore(applicationContext).read() ?: return
+            if (cfg.mode == ReplyMode.AUTOMATIC) {
+                if (cfg.sent >= cfg.dailyLimit) return
+                if (!cfg.instantReplies &&
+                    System.currentTimeMillis() - (lastSent[chat] ?: 0L) < cfg.cooldownMinutes * 60_000L) return
+            }
+
+            // Hold CPU awake only while processing; the lock expires automatically.
+            wakeLock = runCatching {
+                (getSystemService(POWER_SERVICE) as PowerManager)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ReplyMateAI:GenerateReply")
+                    .apply { setReferenceCounted(false); acquire(120_000L) }
+            }.getOrNull()
+
+            stage = ReplyStage.GENERATE
             val draft = GeminiClient.draft(
                 apiKey, chat, body, cfg.personality, cfg.ownerContext,
                 ConversationMemory.recent(chat), cfg.modelId
             )
+            stage = ReplyStage.SAVE_DRAFT
             repo.countGenerated()
+
+            stage = ReplyStage.CONFIRM
             val latest = repo.settings.first()
             if (!latest.enabled || (group && !latest.includeGroups) ||
                 !ContactRules.isPermitted(chat, latest.allowed, latest.blocked, latest.allowAll) ||
@@ -168,6 +176,7 @@ class WhatsAppListener : NotificationListenerService() {
 
             if (latest.mode == ReplyMode.AUTOMATIC) {
                 sendMutex.withLock {
+                    stage = ReplyStage.CONFIRM
                     val current = repo.settings.first()
                     val delaySatisfied = current.instantReplies ||
                         System.currentTimeMillis() - (lastSent[chat] ?: 0L) >=
@@ -177,26 +186,28 @@ class WhatsAppListener : NotificationListenerService() {
                         current.sent < current.dailyLimit && delaySatisfied &&
                         ContactRules.isPermitted(chat, current.allowed, current.blocked, current.allowAll) &&
                         !ReplyLoopGuard.shouldIgnore(chat, body)) {
-                        // Updated WhatsApp notifications can replace the direct-reply action;
-                        // try the most recent action for this same conversation.
+                        stage = ReplyStage.SEND
                         val currentAction = lastActions[chat] ?: action
                         if (ReplyTransport.send(applicationContext, currentAction, draft, chat)) {
                             ConversationMemory.record(chat, body, draft)
                             lastSent[chat] = System.currentTimeMillis()
+                            stage = ReplyStage.RECORD
                             repo.countSent()
                         } else {
-                            repo.recordFailure("WhatsApp notification reply action failed. Open WhatsApp notifications and try again.")
+                            repo.recordFailure(
+                                "Stage: Send WhatsApp reply. Notification reply action failed or expired."
+                            )
                         }
                     }
                 }
             } else if (latest.mode == ReplyMode.MANUAL) {
+                stage = ReplyStage.SAVE_DRAFT
                 val id = ReplyQueue.add(chat, body, draft, lastActions[chat] ?: action)
                 showDraftNotification(chat, id)
             }
         } catch (problem: Exception) {
-            // Store only a safe diagnosis; don't store chat text, recipient or credentials.
-            // If Gemini fails, DO NOT send a fallback or repeated message.
-            repo.recordFailure(FailureDiagnosis.message(problem))
+            // Keep the error category and stage only, never the exception message.
+            runCatching { repo.recordFailure(FailureDiagnosis.message(problem, stage)) }
         } finally {
             runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
         }
