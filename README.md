@@ -171,7 +171,7 @@ The project intentionally uses the `gradle/actions/setup-gradle` GitHub Action t
 - **Replies mirror the incoming text:** Install v1.1.0 or newer, test in **Settings → Try a smart reply**, verify your Gemini key is working and review the generated result. The new echo guard prevents unchanged copies from being auto-sent.
 - **Upgrading the debug APK:** GitHub-hosted builds can use different debug signing certificates. If Android reports a conflicting package or refuses to update, back up your configuration manually, uninstall the old version and install the new APK. You will need to grant permissions and enter your API key again.
 - **Missed messages:** Some phone manufacturers stop apps or delay notifications. The listener is not a guaranteed background queue. Check the **Background operation** controls, battery restrictions, and listener status. Opening the app cannot recover messages that never arrived as notifications.
-- **Build fails:** Review the log in GitHub Actions. Dependencies are retrieved on the runner; a temporary Google Maven or SDK outage may cause a build failure. The ZIP was produced without an Android SDK and has not been compiled on a device.
+- **Build fails:** Review the GitHub Actions logs and uploaded test/lint reports. Dependencies are retrieved on the runner; temporary Maven or SDK outages can fail builds. CI validates the APK identity/signature and performs an Android 14 emulator install/launch/resume smoke test.
 
 ## File structure
 
@@ -194,3 +194,22 @@ app/src/main/java/com/replymate/ai/
 ## Licensing
 
 Sample source released under the MIT License (see LICENSE). This project is independent of WhatsApp/Meta and Google.
+
+
+## Version 1.5.1 reliability changes
+
+- Incoming receipts are synchronously committed on an IO thread before Gemini processing. All guard instances share a lock and read the persisted receipts. Timestamp aliases of suppressed refreshes are retained, including across process restarts; legacy 1.5.0 hashes are respected during upgrade.
+- Identical sender/body notifications are coalesced for **three minutes since the latest refresh**. This conservative choice prevents delayed duplicate replies, but can skip a genuinely repeated identical message. Different messages and conversation shortcut IDs remain independent. Exact aliases expire after 15 minutes; storage is bounded and fails closed if corrupt, full or unwritable.
+- Queued automatic replies older than three minutes, disconnected listeners and revoked notification access are rejected before dispatch. Manual approval rechecks the master switch, contact rules and group opt-in, consumes the draft before sending, and shares the automatic send/accounting mutex.
+- Foreground startup stores the user's choice before starting the service; failed startups preserve that choice. Sticky restarts respect Stop. While opted in, a lightweight check requests listener rebind at most every 30 seconds if disconnected; no message polling or periodic wake lock. Fresh active notifications are checked on reconnect against the durable receipt guard.
+- Home shows actual Android battery exemption and Battery Saver status, a safe app-settings link, and Infinix/XOS setup instructions. OEM Auto-start, Recent-app lock and background restrictions still require user configuration. No boot/force-stop bypass is added; reopen the app after reboot or force-stop.
+- Gemini model selection, message-aware prompts, Sinhala responses, owner context, echo prevention, encrypted key storage and contact/group safety are preserved. Live Gemini/WhatsApp and Infinix hardware behavior require a device test.
+
+### Verify on your Infinix phone
+
+1. Install the APK, grant notification access and review notifications, configure Gemini and an approved contact, and try a personalized reply in Settings.
+2. In XOS/Phone Master allow Auto-start; set ReplyMate to Unrestricted battery/background use; lock it in Recent apps if offered. Disable Power Marathon/Battery Saver while testing. Names vary by firmware.
+3. Start with Manual mode. Send two different messages from another phone and approve a draft once. Confirm one reply, correct recipient and no response to your own outgoing messages.
+4. Enable Automatic only if desired. Confirm the persistent ReplyMate notification, leave the app, lock the screen and send two different messages. Expect one reply per distinct message. Repeat while the Activity is swiped away.
+5. Pause ReplyMate or block the sender during generation; no reply should be sent. Stop background mode; it must remain stopped. After reboot or force-stop, open ReplyMate again.
+6. Reposting or repeating identical content within the three-minute coalescing window may intentionally receive no second reply. A GitHub emulator pass does not prove XOS background delivery or a live Gemini API key works.

@@ -18,6 +18,14 @@ import com.replymate.ai.MainActivity
 import com.replymate.ai.R
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
+import com.replymate.ai.data.SettingsRepository
 
 /**
  * Optional, explicitly user-started foreground service.
@@ -46,20 +54,24 @@ object BackgroundStatus {
             .edit().putBoolean(PREFERRED, enabled).apply()
     }
 
-    fun start(context: Context): Boolean = runCatching {
-        ContextCompat.startForegroundService(
-            context.applicationContext,
-            Intent(context.applicationContext, BackgroundKeepAliveService::class.java)
-        )
-        // Start only from a visible screen / explicit user action. Save the user's
-        // choice for service recovery on returning to the Activity, not at boot.
+    fun start(context: Context): Boolean {
+        val wasRequested = requested(context)
+        // Persist before the service can receive its first command or sticky restart.
         rememberRequested(context, true)
+        val wasStopped = stoppedByUser(context)
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(MANUALLY_STOPPED, false).apply()
-        true
-    }.getOrElse {
-        rememberRequested(context, false)
-        false
+        return runCatching {
+            ContextCompat.startForegroundService(context.applicationContext,
+                Intent(context.applicationContext, BackgroundKeepAliveService::class.java))
+            true
+        }.getOrElse {
+            // A temporary startup restriction must not erase the user's prior choice.
+            rememberRequested(context, wasRequested)
+            context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(MANUALLY_STOPPED, wasStopped).apply()
+            false
+        }
     }
 
     fun stop(context: Context) {
@@ -80,10 +92,14 @@ class BackgroundKeepAliveService : Service() {
         private const val ACTION_STOP = "com.replymate.ai.STOP_BACKGROUND"
     }
 
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var recoveryStarted = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
+        if (intent?.action == ACTION_STOP || !BackgroundStatus.requested(this) ||
+            BackgroundStatus.stoppedByUser(this)) {
             BackgroundStatus.rememberRequested(this, false)
             getSharedPreferences("replymate_background_settings", Context.MODE_PRIVATE).edit()
                 .putBoolean("manually_stopped", true).apply()
@@ -120,10 +136,17 @@ class BackgroundKeepAliveService : Service() {
             .addAction(Notification.Action.Builder(null, "Stop background", stop).build())
             .build()
 
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, status, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-        } else {
-            startForeground(NOTIFICATION_ID, status)
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, status, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, status)
+            }
+        } catch (_: Exception) {
+            // Do not crash if the OS rejects promotion; the screen shows stopped status.
+            BackgroundStatus.setRunning(false)
+            stopSelf()
+            return START_NOT_STICKY
         }
         BackgroundStatus.setRunning(true)
 
@@ -133,18 +156,32 @@ class BackgroundKeepAliveService : Service() {
         // The notification-listener permission is managed by Android.
         // The system binds notification listeners independently of this foreground service.
         // Request recovery only when it isn't already connected.
-        if (!WhatsAppListener.isConnected &&
-            NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)) {
-            runCatching {
-                NotificationListenerService.requestRebind(
-                    ComponentName(this, WhatsAppListener::class.java)
-                )
+        if (!recoveryStarted) {
+            recoveryStarted = true
+            scope.launch {
+                while (BackgroundStatus.requested(this@BackgroundKeepAliveService) &&
+                    !BackgroundStatus.stoppedByUser(this@BackgroundKeepAliveService)) {
+                    val allowed = ReplyPermissions.listenerAllowed(this@BackgroundKeepAliveService)
+                    val enabled = SettingsRepository(applicationContext).settings.first().enabled
+                    if (!enabled || !allowed) {
+                        BackgroundStatus.stop(this@BackgroundKeepAliveService)
+                        break
+                    }
+                    // Check binding health, not messages. No wake lock or background FGS
+                    // relaunch loop; OS/user force-stop remains respected.
+                    if (!WhatsAppListener.isConnected) runCatching {
+                        NotificationListenerService.requestRebind(
+                            ComponentName(this@BackgroundKeepAliveService, WhatsAppListener::class.java))
+                    }
+                    delay(30_000L)
+                }
             }
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        scope.cancel()
         BackgroundStatus.setRunning(false)
         super.onDestroy()
     }

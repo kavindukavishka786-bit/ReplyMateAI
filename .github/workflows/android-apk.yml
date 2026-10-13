@@ -1,7 +1,8 @@
 name: Build ReplyMate APK
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/**']
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,6 @@ jobs:
           java-version: '17'
       - name: Install Android API 36 using preinstalled SDK
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
           SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           SDK_MANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
           test -n "$SDK_MANAGER"
@@ -30,12 +30,77 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.13'
-      - name: Test and compile APK
-        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace
+      - name: Regression tests, Android lint and APK
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --stacktrace
+      - name: Verify APK identity, signing and tests
+        run: |
+          mkdir -p verification
+          TOOLS="$ANDROID_HOME/build-tools/35.0.0"
+          "$TOOLS/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk > verification/signing.txt
+          "$TOOLS/aapt" dump badging app/build/outputs/apk/debug/app-debug.apk > verification/apk-info.txt
+          grep "package: name='com.replymate.ai'.*versionCode='10'.*versionName='1.5.1'" verification/apk-info.txt
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > verification/SHA256SUMS.txt
+          python3 - <<'PY'
+          import glob, xml.etree.ElementTree as ET
+          reports = [ET.parse(p).getroot() for p in glob.glob('app/build/test-results/testDebugUnitTest/TEST-*.xml')]
+          assert reports, 'Missing test results'
+          tests = sum(int(r.attrib['tests']) for r in reports)
+          failures = sum(int(r.attrib['failures']) + int(r.attrib['errors']) for r in reports)
+          assert failures == 0
+          result = f'{tests} tests; {failures} failures/errors\n'
+          print(result)
+          open('verification/test-summary.txt', 'w').write(result)
+          PY
       - name: Upload installable APK
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ReplyMate-AI-Debug-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            verification/
           if-no-files-found: error
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReplyMate-test-reports
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            app/build/reports/lint-results-debug.*
+          if-no-files-found: warn
+
+  emulator-smoke:
+    needs: android
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ReplyMate-AI-Debug-APK
+          path: built
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Install and launch APK on Android 14
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: bash scripts/emulator-smoke.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ReplyMate-emulator-smoke
+          path: smoke/
+          if-no-files-found: warn

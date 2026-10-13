@@ -13,8 +13,8 @@ class ReceiptPolicyTest {
 
     @Test fun originalReceiptStaysBlockedAfterRefreshWindow() {
         val previous = listOf(Triple("original", "body-hash", 1_000L))
-        assertTrue(ReceiptPolicy.isDuplicate(previous, "original", "body-hash", 75_000L))
-        assertFalse(ReceiptPolicy.isDuplicate(previous, "a-new-message-event", "body-hash", 75_000L))
+        assertTrue(ReceiptPolicy.isDuplicate(previous, "original", "body-hash", 200_000L))
+        assertFalse(ReceiptPolicy.isDuplicate(previous, "a-new-message-event", "body-hash", 200_000L))
     }
 
     @Test fun differentMessagesStillReplyImmediately() {
