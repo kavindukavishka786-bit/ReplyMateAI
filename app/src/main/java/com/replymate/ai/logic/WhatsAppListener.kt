@@ -184,6 +184,8 @@ class WhatsAppListener : NotificationListenerService() {
                             ConversationMemory.record(chat, body, draft)
                             lastSent[chat] = System.currentTimeMillis()
                             repo.countSent()
+                        } else {
+                            repo.recordFailure("WhatsApp notification reply action failed. Open WhatsApp notifications and try again.")
                         }
                     }
                 }
@@ -191,9 +193,10 @@ class WhatsAppListener : NotificationListenerService() {
                 val id = ReplyQueue.add(chat, body, draft, lastActions[chat] ?: action)
                 showDraftNotification(chat, id)
             }
-        } catch (_: Exception) {
-            // Never auto-send a canned reply when the API or network is down.
-            repo.countSkipped()
+        } catch (problem: Exception) {
+            // Store only a safe diagnosis; don't store chat text, recipient or credentials.
+            // If Gemini fails, DO NOT send a fallback or repeated message.
+            repo.recordFailure(FailureDiagnosis.message(problem))
         } finally {
             runCatching { if (wakeLock?.isHeld == true) wakeLock.release() }
         }
