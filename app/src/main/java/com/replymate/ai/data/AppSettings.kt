@@ -26,6 +26,7 @@ data class AppSettings(
     val ownerContext: String = "",
     val dailyLimit: Int = 20,
     val cooldownMinutes: Int = 15,
+    val instantReplies: Boolean = true,
     val generated: Int = 0,
     val sent: Int = 0,
     val skipped: Int = 0,
@@ -44,6 +45,7 @@ class SettingsRepository(private val context: Context) {
         val ownerContext = stringPreferencesKey("owner_context")
         val dailyLimit = intPreferencesKey("daily_limit")
         val cooldown = intPreferencesKey("cooldown")
+        val instant = booleanPreferencesKey("instant_replies")
         val generated = intPreferencesKey("generated")
         val sent = intPreferencesKey("sent")
         val skipped = intPreferencesKey("skipped")
@@ -63,6 +65,7 @@ class SettingsRepository(private val context: Context) {
             ownerContext = p[Keys.ownerContext] ?: "",
             dailyLimit = p[Keys.dailyLimit] ?: 20,
             cooldownMinutes = p[Keys.cooldown] ?: 15,
+            instantReplies = p[Keys.instant] ?: true,
             generated = if (p[Keys.date] == today) p[Keys.generated] ?: 0 else 0,
             sent = if (p[Keys.date] == today) p[Keys.sent] ?: 0 else 0,
             skipped = if (p[Keys.date] == today) p[Keys.skipped] ?: 0 else 0,
@@ -80,6 +83,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setOwnerContext(value: String) = edit(Keys.ownerContext, value.take(700))
     suspend fun setDailyLimit(value: Int) = edit(Keys.dailyLimit, value.coerceIn(1, 50))
     suspend fun setCooldown(value: Int) = edit(Keys.cooldown, value.coerceIn(1, 120))
+    suspend fun setInstantReplies(value: Boolean) = edit(Keys.instant, value)
 
     private suspend fun <T> edit(key: Preferences.Key<T>, value: T) {
         context.replyMateStore.edit { it[key] = value }
