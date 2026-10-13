@@ -41,6 +41,7 @@ object ReplyQueue {
             return false
         }
         val sent = ReplyTransport.send(context, draft.action, reply.take(700))
+        if (sent) ConversationMemory.record(draft.sender, draft.incoming, reply)
         discard(id)
         return sent
     }
