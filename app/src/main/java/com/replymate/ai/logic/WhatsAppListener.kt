@@ -22,6 +22,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -29,17 +31,18 @@ import java.util.Collections
 
 class WhatsAppListener : NotificationListenerService() {
     companion object {
-        @Volatile var isConnected: Boolean = false
-            private set
+        private val _connected = MutableStateFlow(false)
+        val connected = _connected.asStateFlow()
+        val isConnected: Boolean get() = _connected.value
     }
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        isConnected = true
+        _connected.value = true
     }
 
     override fun onListenerDisconnected() {
-        isConnected = false
+        _connected.value = false
         super.onListenerDisconnected()
     }
 
@@ -176,7 +179,7 @@ class WhatsAppListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
-        isConnected = false
+        _connected.value = false
         scope.cancel()
         super.onDestroy()
     }
