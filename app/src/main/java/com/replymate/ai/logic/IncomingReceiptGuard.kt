@@ -47,7 +47,7 @@ class IncomingReceiptGuard(context: Context) {
                 val at = row.optLong("at", 0L)
                 val exact = row.optString("exact", "")
                 val loose = row.optString("loose", "")
-                if (exact.isNotBlank() && loose.isNotBlank() && now - at in 0..EXACT_TTL_MS) {
+                if (exact.isNotBlank() && loose.isNotBlank() && now - at in 0L..EXACT_TTL_MS) {
                     entries.add(Item(exact, loose, at))
                 }
             }
@@ -69,8 +69,8 @@ class IncomingReceiptGuard(context: Context) {
         val normalized = IncomingReplySafety.normalizedBody(message)
         val loose = digest(header + normalized)
         val exact = digest(header + timestamp.toString() + "|" + normalized)
-        if (entries.any { it.exact == exact ||
-                (it.loose == loose && now - it.at in 0..REFRESH_TTL_MS) }) return false
+        if (ReceiptPolicy.isDuplicate(entries.map { Triple(it.exact, it.loose, it.at) },
+                exact, loose, now, REFRESH_TTL_MS)) return false
         entries.add(Item(exact, loose, now))
         if (entries.size > MAX_RECEIPTS) entries.subList(0, entries.size - MAX_RECEIPTS).clear()
         val arr = JSONArray()
