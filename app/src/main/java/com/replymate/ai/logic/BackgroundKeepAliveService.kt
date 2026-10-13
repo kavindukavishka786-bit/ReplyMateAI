@@ -33,9 +33,13 @@ object BackgroundStatus {
 
     private const val PREFS = "replymate_background_settings"
     private const val PREFERRED = "requested_by_user"
+    private const val MANUALLY_STOPPED = "manually_stopped"
 
     fun requested(context: Context): Boolean = context.applicationContext
         .getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(PREFERRED, false)
+
+    fun stoppedByUser(context: Context): Boolean = context.applicationContext
+        .getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(MANUALLY_STOPPED, false)
 
     internal fun rememberRequested(context: Context, enabled: Boolean) {
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -50,6 +54,8 @@ object BackgroundStatus {
         // Start only from a visible screen / explicit user action. Save the user's
         // choice for service recovery on returning to the Activity, not at boot.
         rememberRequested(context, true)
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(MANUALLY_STOPPED, false).apply()
         true
     }.getOrElse {
         rememberRequested(context, false)
@@ -58,6 +64,8 @@ object BackgroundStatus {
 
     fun stop(context: Context) {
         rememberRequested(context, false)
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(MANUALLY_STOPPED, true).apply()
         context.applicationContext.stopService(
             Intent(context.applicationContext, BackgroundKeepAliveService::class.java)
         )
@@ -77,6 +85,8 @@ class BackgroundKeepAliveService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             BackgroundStatus.rememberRequested(this, false)
+            getSharedPreferences("replymate_background_settings", Context.MODE_PRIVATE).edit()
+                .putBoolean("manually_stopped", true).apply()
             BackgroundStatus.setRunning(false)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
