@@ -1,6 +1,6 @@
 # ReplyMate AI (Android, Kotlin + Jetpack Compose)
 
-**ReplyMate AI** is a personal, opt-in WhatsApp notification assistant. It drafts a response to *new* incoming messages with **Gemini 3.5 Flash-Lite**. It can either let you review/edit and approve each draft, or (only when you explicitly enable it) attempt an automatic Android notification direct reply.
+**ReplyMate AI** is a personal, opt-in WhatsApp notification assistant. It generates an actual, message-aware response to *new* incoming messages with **Gemini 3.5 Flash-Lite**, rather than repeating the sender's message. It can either let you review/edit and approve each draft, or (only when you explicitly enable it) attempt an automatic Android notification direct reply.
 
 ![status](https://img.shields.io/badge/Android-8.0%2B-64E8D5) ![language](https://img.shields.io/badge/Kotlin-Jetpack%20Compose-7A94FF)
 
@@ -11,12 +11,26 @@
 - Supports WhatsApp **personal** application package `com.whatsapp` only. Does not request Contacts, SMS, Accessibility, Media, microphone or storage permission.
 - Uses Android `NotificationListenerService` and Android `RemoteInput` directly from WhatsApp notification actions. No unofficial WhatsApp SDK, no QR login, no web scraping.
 - API key is provided on your phone **after installation**. AES-256/GCM Android Keystore-backed encrypted storage at rest; never hard-coded or stored in GitHub.
-- Sends only the sender's displayed notification title + latest notification text and your AI instructions to Gemini over HTTPS. No cloud server of our own.
-- Pending drafts are **memory-only** and disappear if Android kills the app. No chat history database.
+- Sends the sender's displayed notification title, current notification text, any short-lived conversation context, and your AI style/optional owner-approved details to Gemini over HTTPS. No cloud server of our own.
+- Pending drafts and brief per-contact conversation history are **memory-only** and disappear if Android kills the app. There is no chat history database.
 - Editable drafts and explicit Approve/Discard buttons. Drafts expire after five minutes.
 - Optional automatic mode asks for explicit confirmation. Limits, contact allow-list and master switch rechecked before sending.
+- The Gemini prompt responds to what the sender means instead of copying their words. If Gemini echoes the message, ReplyMate retries once and blocks a second echoed result.
+- Recent successful replies (up to four turns per contact) are held in memory for two hours for natural follow-up conversations, never written to chat storage.
+- Optional owner-approved personal details let you customize how the assistant handles questions about your availability or work. Never add secrets.
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
+
+## Personalized reply examples (v1.1.0)
+
+| Incoming message | Example of what Gemini can write (actual output varies) |
+| --- | --- |
+| `Hi` | `Hey! I'm the AI helping with messages. What's up?` |
+| `Can we meet tomorrow?` | `The owner will need to confirm. What time did you have in mind?` |
+| `ඔයාට අද වෙලාව තියෙනවද?` | `මම එයාගේ AI සහායකයා. අද වෙලාව තියෙනවද කියලා එයාට තහවුරු කරන්න වෙයි.` |
+| `What did we decide?` | Can refer to recent replies *sent through ReplyMate*, if the app is still running. It cannot read your full WhatsApp chat history. |
+
+In **Settings → Assistant personality**, customize tone. In **Settings → Personal details**, enter only non-sensitive facts that the assistant is allowed to share or use. Use **Try a smart reply** with a test message before enabling automatic mode.
 
 ## Important limitations
 
@@ -73,6 +87,8 @@ The project intentionally uses the `gradle/actions/setup-gradle` GitHub Action t
 - **No reply drafts:** Check Notification access, the master switch, key, approved contact name, WhatsApp notification content, and whether the notification has a reply action. Turn off WhatsApp's hidden message previews for the test if necessary, with privacy in mind.
 - **Manual approval fails:** WhatsApp's notification action may already have expired or been dismissed. Send manually in WhatsApp instead. Review items also expire after five minutes and vanish on process death.
 - **Key test fails:** Confirm your Google AI Studio project/API-key restrictions, network, available Gemini quota, and model availability. Model string: `gemini-3.5-flash-lite`.
+- **Replies mirror the incoming text:** Install v1.1.0 or newer, test in **Settings → Try a smart reply**, verify your Gemini key is working and review the generated result. The new echo guard prevents unchanged copies from being auto-sent.
+- **Upgrading the debug APK:** GitHub-hosted builds can use different debug signing certificates. If Android reports a conflicting package or refuses to update, back up your configuration manually, uninstall the old version and install the new APK. You will need to grant permissions and enter your API key again.
 - **Missed messages:** Some phone manufacturers stop apps or delay notifications. The listener is not a guaranteed background queue.
 - **Build fails:** Review the log in GitHub Actions. Dependencies are retrieved on the runner; a temporary Google Maven or SDK outage may cause a build failure. The ZIP was produced without an Android SDK and has not been compiled on a device.
 
@@ -90,6 +106,8 @@ app/src/main/java/com/replymate/ai/
   logic/ReplyQueue.kt                      # pending reviews + Android direct reply
   logic/ContactRules.kt                    # exact-match contact rules
   logic/WhatsAppListener.kt                 # filters/limits/notification processing
+  logic/ConversationMemory.kt               # short-lived, per-contact in-memory context
+  logic/ReplyQuality.kt                     # echo prevention
 ```
 
 ## Licensing
