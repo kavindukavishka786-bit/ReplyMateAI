@@ -21,6 +21,15 @@
 - Test screen lets you check Gemini without sending a WhatsApp message.
 - GitHub Actions produces `app-debug.apk`, no Android Studio needed.
 
+## Important outgoing-message loop fix (v1.2.0)
+
+ReplyMate previously could mistake its **own sent message** for an incoming WhatsApp notification, then respond again. Version 1.2.0 prevents that feedback loop in two ways:
+
+1. It accepts only notifications that expose structured Android MessagingStyle messages with a distinct, identifiable sender. It no longer trusts the generic `EXTRA_TEXT` notification preview as proof of an incoming message; ambiguous or unsupported notifications are **ignored**.
+2. Immediately **before** sending a manual or automatic reply, it records a short-lived outgoing fingerprint. For that contact, notification updates are blocked for 20 seconds, and echoes of the actual outgoing text are rejected for 10 minutes. No raw messages are saved to disk.
+
+This conservative approach may **miss real messages** received very shortly after a sent reply, or all messages on WhatsApp builds that do not expose sender metadata. That tradeoff avoids repetitive auto-sending. Keep manual mode while testing. It is not an official WhatsApp integration and cannot guarantee correct direction detection on every phone. Send messages from a second WhatsApp account for testing. Stop using the app if self-replies recur.
+
 ## Personalized reply examples (v1.1.0)
 
 | Incoming message | Example of what Gemini can write (actual output varies) |
@@ -87,6 +96,7 @@ The project intentionally uses the `gradle/actions/setup-gradle` GitHub Action t
 - **No reply drafts:** Check Notification access, the master switch, key, approved contact name, WhatsApp notification content, and whether the notification has a reply action. Turn off WhatsApp's hidden message previews for the test if necessary, with privacy in mind.
 - **Manual approval fails:** WhatsApp's notification action may already have expired or been dismissed. Send manually in WhatsApp instead. Review items also expire after five minutes and vanish on process death.
 - **Key test fails:** Confirm your Google AI Studio project/API-key restrictions, network, available Gemini quota, and model availability. Model string: `gemini-3.5-flash-lite`.
+- **App replies to its own outgoing messages:** Upgrade to **v1.2.0**, turn off the app before updating, then test on a second number with manual review enabled. Version 1.2.0 drops ambiguous notification types and suppresses feedback from outgoing direct replies.
 - **Replies mirror the incoming text:** Install v1.1.0 or newer, test in **Settings → Try a smart reply**, verify your Gemini key is working and review the generated result. The new echo guard prevents unchanged copies from being auto-sent.
 - **Upgrading the debug APK:** GitHub-hosted builds can use different debug signing certificates. If Android reports a conflicting package or refuses to update, back up your configuration manually, uninstall the old version and install the new APK. You will need to grant permissions and enter your API key again.
 - **Missed messages:** Some phone manufacturers stop apps or delay notifications. The listener is not a guaranteed background queue.
