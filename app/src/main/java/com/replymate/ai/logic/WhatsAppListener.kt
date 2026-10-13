@@ -62,7 +62,7 @@ class WhatsAppListener : NotificationListenerService() {
         if (BackgroundStatus.requested(applicationContext) &&
             NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)) {
             runCatching {
-                requestRebind(ComponentName(this, WhatsAppListener::class.java))
+                NotificationListenerService.requestRebind(ComponentName(this, WhatsAppListener::class.java))
             }
         }
     }
