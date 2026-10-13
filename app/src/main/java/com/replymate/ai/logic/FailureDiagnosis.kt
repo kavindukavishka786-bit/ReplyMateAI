@@ -1,49 +1,90 @@
 package com.replymate.ai.logic
 
+import java.io.EOFException
+import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
+import org.json.JSONException
 
-/**
- * User-facing failure diagnostics: NO incoming message text, API key, contact name,
- * request body, stack trace, or raw server response is ever stored.
- */
+/** Safe diagnostic stages, never populated from sender data. */
+enum class ReplyStage(val display: String) {
+    LOAD_SETTINGS("Load settings"),
+    CHECK_PERMISSIONS("Check permissions and key"),
+    GENERATE("Generate AI response"),
+    SAVE_DRAFT("Record generated draft"),
+    CONFIRM("Verify reply settings"),
+    SEND("Send WhatsApp reply"),
+    RECORD("Save counters"),
+    TEST("Test Gemini")
+}
+
+/** No contacts, message text, raw HTTP response, stack traces or API keys are stored. */
 object FailureDiagnosis {
-    fun message(error: Exception): String {
-        if (error is UnknownHostException || error is ConnectException) {
-            return "Network unavailable. Connect to Wi-Fi or mobile data and try the AI test."
+    fun message(error: Exception, stage: ReplyStage = ReplyStage.GENERATE): String {
+        val prefix = "Stage: ${stage.display}. "
+        val detail = when (error) {
+            is UnknownHostException, is ConnectException ->
+                "No network connection to Gemini. Check mobile data and Wi-Fi."
+            is SocketTimeoutException ->
+                "Gemini timed out. Check internet stability and retry."
+            is SSLException ->
+                "HTTPS security failed. Check the device date, time and network."
+            is EOFException ->
+                "Connection closed while receiving Google's response. Retry on a stable network."
+            is SocketException ->
+                "Network connection was interrupted or reset. Check data signal and try again."
+            is InterruptedIOException ->
+                "Network operation was interrupted. Check the connection and retry."
+            is IOException ->
+                "Network read/write failed. Test using Wi-Fi or mobile data."
+            is JSONException ->
+                "The Gemini response could not be parsed (JSON). Test API access and retry."
+            is SecurityException ->
+                "Android denied the request. Review ReplyMate notification access and permissions."
+            else -> classify(error)
         }
-        if (error is SocketTimeoutException) {
-            return "Gemini request timed out. Check your connection and try again."
+        return (prefix + detail).take(240)
+    }
+
+    private fun classify(error: Exception): String {
+        val raw = error.message.orEmpty()
+        val http = Regex("\\bHTTP\\s+(\\d{3})\\b").find(raw)
+            ?.groupValues?.getOrNull(1)?.toIntOrNull()
+        if (http != null) return when (http) {
+            400 -> "Gemini HTTP 400: Request rejected. Check model/API configuration."
+            401, 403 -> "Gemini HTTP $http: API key is invalid or lacks access."
+            402 -> "Gemini HTTP 402: Project billing or credits are required."
+            404 -> "Gemini HTTP 404: Model is unavailable to this API key."
+            408, 500, 502, 503, 504 -> "Gemini HTTP $http: Temporary API failure. Try again."
+            429 -> "Gemini HTTP 429: Project quota or rate limit reached."
+            else -> "Gemini HTTP $http: Request rejected by Google."
         }
-        if (error is SSLException) {
-            return "Secure connection to Gemini failed. Check your network and phone time."
+        if (raw.contains("produced no reply", true) || raw.contains("produced no text", true)) {
+            return "Gemini produced no usable answer; nothing was sent."
         }
-        if (error is SecurityException) {
-            return "Android denied an operation. Check ReplyMate notification and background permissions."
+        if (raw.contains("repeated the incoming", true)) {
+            return "Gemini repeated the incoming text; reply blocked."
         }
-        val text = error.message.orEmpty()
-        val code = Regex("\\bHTTP\\s+(\\d{3})\\b").find(text)?.groupValues?.get(1)?.toIntOrNull()
-        if (code != null) return when (code) {
-            400 -> "Gemini HTTP 400: Invalid API request. Check model and request settings."
-            401, 403 -> "Gemini HTTP $code: API key is invalid, restricted, or not authorized for this project."
-            402 -> "Gemini HTTP 402: Billing or credits are required for this API request."
-            404 -> "Gemini HTTP 404: The selected Gemini model is not available to this API key."
-            408, 500, 502, 503, 504 -> "Gemini HTTP $code: Temporary server issue. Retry after a short wait."
-            429 -> "Gemini HTTP 429: Usage quota or rate limit reached. Check your Google AI Studio limits."
-            else -> "Gemini HTTP $code: The API rejected the request. Check model access and quota."
+        if (raw.contains("notification reply action", true) ||
+            raw.contains("no compatible reply action", true)) {
+            return "WhatsApp notification has no usable reply action."
         }
-        return when {
-            text.contains("produced no reply", true) ||
-            text.contains("produced no text", true) ->
-                "Gemini returned an empty reply. Test the AI again with a simple message."
-            text.contains("repeated the incoming", true) ->
-                "Gemini repeated the incoming text twice, so ReplyMate blocked the unsafe reply."
-            text.contains("no compatible reply action", true) ||
-            text.contains("notification reply action", true) ->
-                "WhatsApp did not provide a working notification Reply action."
-            else -> "Unexpected reply processing error. Open Settings and run the Gemini test."
+
+        // Exception class is known from compiled code; never show exception.message,
+        // which can contain private message text, endpoint credentials or file paths.
+        val kind = when (error) {
+            is NullPointerException -> "NullPointerException"
+            is IllegalStateException -> "IllegalStateException"
+            is IllegalArgumentException -> "IllegalArgumentException"
+            is ClassCastException -> "ClassCastException"
+            is UnsupportedOperationException -> "UnsupportedOperationException"
+            else -> error.javaClass.simpleName.replace(Regex("[^A-Za-z0-9]"), "").take(32)
+                .ifEmpty { "UnknownException" }
         }
+        return "Unexpected $kind. Open Settings and run Test Gemini."
     }
 }
