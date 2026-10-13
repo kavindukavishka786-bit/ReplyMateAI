@@ -11,6 +11,7 @@ import android.os.Build
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationCompat
 import com.replymate.ai.MainActivity
 import com.replymate.ai.data.ReplyMode
 import com.replymate.ai.data.SecretStore
@@ -38,10 +39,27 @@ class WhatsAppListener : NotificationListenerService() {
         if ((notification.flags and Notification.FLAG_GROUP_SUMMARY) != 0) return
         val extras = notification.extras ?: return
         val sender = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        val incoming = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
-        if (sender.isEmpty() || incoming.isEmpty() || incoming.length > 4000) return
-        if (incoming.startsWith("You:", ignoreCase = true)) return
-        if (incoming.matches(Regex("(?i)^\\d+ (new )?messages?$"))) return
+        if (sender.isEmpty()) return
+
+        // STRICT inbound-only parsing. EXTRA_TEXT alone cannot tell an incoming message
+        // from our own direct reply; WhatsApp may repost the conversation notification.
+        // Ignore ambiguous notification formats rather than risk an endless reply loop.
+        val style = runCatching {
+            NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
+        }.getOrNull() ?: return
+        val latestMessage = style.messages.lastOrNull() ?: return
+        val person = latestMessage.person ?: return
+        if (!IncomingReplySafety.isDefinitelyIncoming(
+                person.name?.toString(), person.key,
+                style.user.name?.toString(), style.user.key)) return
+        val incoming = latestMessage.text?.toString()?.trim().orEmpty()
+        if (incoming.isBlank() || incoming.length > 4000 ||
+            IncomingReplySafety.isOwnTextPrefix(incoming) ||
+            incoming.matches(Regex("(?i)^\\d+ (new )?messages?$"))) return
+
+        // If an outgoing reply triggers another notification, suppress it even when
+        // WhatsApp's notification metadata isn't completely reliable.
+        if (ReplyLoopGuard.shouldIgnore(sender, incoming)) return
         val group = (Build.VERSION.SDK_INT >= 28 &&
             extras.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION, false)) ||
             !extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE).isNullOrBlank()
@@ -51,7 +69,7 @@ class WhatsAppListener : NotificationListenerService() {
         } ?: return
 
         // Drop repeated notification updates and overlapping generation for one sender.
-        val fingerprint = "$sender\u0000$incoming"
+        val fingerprint = "$sender\u0000${latestMessage.timestamp}\u0000$incoming"
         val now = System.currentTimeMillis()
         synchronized(seen) {
             if (now - (seen[fingerprint] ?: 0L) < 90_000L) return
@@ -79,6 +97,9 @@ class WhatsAppListener : NotificationListenerService() {
                 // Recheck master toggle/mode after network call to prevent sends during shutdown.
                 val latest = repository.settings.first()
                 if (!latest.enabled || !ContactRules.isPermitted(sender, latest.allowed, latest.blocked, latest.allowAll)) return@launch
+                // Mode/permissions may change while Gemini is generating the reply.
+                // Never send a draft if we have recently sent to this conversation.
+                if (ReplyLoopGuard.shouldIgnore(sender, incoming)) return@launch
                 if (latest.mode == ReplyMode.AUTOMATIC) {
                     sendMutex.withLock {
                         val current = repository.settings.first()
@@ -86,7 +107,7 @@ class WhatsAppListener : NotificationListenerService() {
                             current.sent < current.dailyLimit &&
                             ContactRules.isPermitted(sender, current.allowed, current.blocked, current.allowAll) &&
                             (System.currentTimeMillis() - (lastSent[sender] ?: 0L)) >= current.cooldownMinutes * 60_000L) {
-                            if (ReplyTransport.send(applicationContext, action, draft)) {
+                            if (ReplyTransport.send(applicationContext, action, draft, sender)) {
                                 ConversationMemory.record(sender, incoming, draft)
                                 lastSent[sender] = System.currentTimeMillis()
                                 repository.countSent()
