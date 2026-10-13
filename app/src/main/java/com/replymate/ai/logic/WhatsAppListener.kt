@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Incoming WhatsApp notifications are parsed immediately, even if the Activity is closed.
@@ -124,11 +125,19 @@ class WhatsAppListener : NotificationListenerService() {
             return
         }
         val lock = senderLocks.computeIfAbsent(chat) { Mutex() }
-        // UNDISPATCHED (the next coroutine is already suspended at the lock) makes
-        // messages enter that contact's queue in notification arrival order.
+        // UNDISPATCHED acquires the per-contact mutex in notification arrival order.
+        // CRITICAL: UNDISPATCHED starts executing on the caller's thread, which is
+        // Android's main thread for NotificationListenerService callbacks. Switch
+        // dispatchers BEFORE accessing the Gemini HTTP client. Otherwise a warm
+        // DataStore read can make GeminiClient run on main and Android throws
+        // NetworkOnMainThreadException even though scope's context contains IO.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                lock.withLock { process(chat, body, group, action) }
+                lock.withLock {
+                    withContext(Dispatchers.IO) {
+                        process(chat, body, group, action)
+                    }
+                }
             } finally {
                 count.decrementAndGet()
             }
