@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.ComponentName
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
@@ -13,6 +14,7 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationManagerCompat
 import com.replymate.ai.MainActivity
 import com.replymate.ai.data.ReplyMode
 import com.replymate.ai.data.SecretStore
@@ -54,6 +56,15 @@ class WhatsAppListener : NotificationListenerService() {
     override fun onListenerDisconnected() {
         _connected.value = false
         super.onListenerDisconnected()
+        // When Android temporarily disconnects the listener, ask for a rebind
+        // only if the user enabled background mode and permission still exists.
+        // This is not a way around a user force-stop or revoked permission.
+        if (BackgroundStatus.requested(applicationContext) &&
+            NotificationManagerCompat.getEnabledListenerPackages(this).contains(packageName)) {
+            runCatching {
+                requestRebind(ComponentName(this, WhatsAppListener::class.java))
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
